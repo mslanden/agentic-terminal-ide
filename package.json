@@ -1,0 +1,108 @@
+{
+  "name": "agentic-terminal-ide",
+  "version": "1.0.0",
+  "description": "Agentic Terminal IDE - A native terminal environment for AI-assisted development with Claude",
+  "main": "src/main/main.js",
+  "scripts": {
+    "build": "esbuild src/renderer/renderer.js --bundle --platform=browser --outfile=src/renderer/bundle.js --external:electron",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --enable-logging",
+    "generate-icons": "node scripts/generate-icons.js",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:dir": "npm run build && electron-builder --dir"
+  },
+  "keywords": [
+    "electron",
+    "ai",
+    "programming",
+    "claude"
+  ],
+  "author": "Marcelino Landen",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.2",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.4.0",
+    "esbuild": "^0.27.2",
+    "sharp": "^0.34.5"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron-updater": "^6.7.3",
+    "marked": "^17.0.1",
+    "node-pty": "^1.1.0"
+  },
+  "build": {
+    "appId": "com.agentic-terminal-ide.app",
+    "productName": "Agentic Terminal IDE",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "${productName}",
+      "icon": "build/icon.icns",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "mslanden",
+      "repo": "agentic-terminal-ide"
+    }
+  }
+}

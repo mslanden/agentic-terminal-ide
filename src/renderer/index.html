@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self' data: blob:">
+  <title>Agentic Terminal IDE</title>
+  <link rel="stylesheet" href="styles/xterm.css">
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Left Sidebar: Projects -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h2>Projects</h2>
+        <div style="display: flex; gap: 4px;">
+          <div class="theme-toggle">
+            <button class="theme-toggle-btn" id="theme-toggle" title="Toggle theme">
+              <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <button class="icon-btn" id="add-project-btn" title="Add Project">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="project-list" id="project-list">
+        <!-- Projects will be populated here -->
+        <div class="empty-state">
+          <p>No projects yet</p>
+          <span>Add a folder to get started</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Resize handle -->
+    <div class="resize-handle" id="left-resize"></div>
+
+    <!-- Middle: Terminal -->
+    <main class="terminal-panel" id="terminal-panel">
+      <div class="panel-header">
+        <div class="terminal-tabs" id="terminal-tabs">
+          <!-- Terminal tabs will be populated dynamically -->
+        </div>
+        <div class="terminal-actions">
+          <button class="icon-btn" id="split-terminal-btn" title="Split Terminal (Cmd+\)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="2" y="2" width="12" height="12" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 2v12" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="new-terminal-btn" title="New Terminal (Cmd+T)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="terminal-content" id="terminal-content">
+        <div class="terminal-search" id="terminal-search">
+          <input type="text" class="terminal-search-input" id="terminal-search-input" placeholder="Search...">
+          <span class="terminal-search-count" id="terminal-search-count"></span>
+          <div class="terminal-search-nav">
+            <button class="terminal-search-btn" id="terminal-search-prev" title="Previous (Shift+Enter)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                <path d="M18 15l-6-6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <button class="terminal-search-btn" id="terminal-search-next" title="Next (Enter)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <button class="terminal-search-btn terminal-search-close" id="terminal-search-close" title="Close (Escape)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="terminal-placeholder">
+          <div class="terminal-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+              <path d="M4 17l6-6-6-6M12 19h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <p>Select a project to start</p>
+          <span class="hint">Or click to open terminal in home directory</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- Resize handle -->
+    <div class="resize-handle" id="right-resize"></div>
+
+    <!-- Right Panel: Context -->
+    <aside class="context-panel" id="context-panel">
+      <div class="panel-header">
+        <div class="context-tabs">
+          <button class="tab active" data-tab="preview">Preview</button>
+          <button class="tab" data-tab="files">Files</button>
+          <button class="tab" data-tab="git">Git</button>
+          <button class="tab" data-tab="notes">Notes</button>
+        </div>
+      </div>
+
+      <!-- Preview Tab -->
+      <div class="tab-content active" id="preview-tab">
+        <div class="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <p>File Preview</p>
+          <span>Select a file to preview</span>
+        </div>
+      </div>
+
+      <!-- Files Tab -->
+      <div class="tab-content" id="files-tab">
+        <div class="file-tree" id="file-tree">
+          <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p>Project Files</p>
+            <span>Select a project to browse</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Git Tab -->
+      <div class="tab-content" id="git-tab">
+        <div class="git-panel" id="git-panel">
+          <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="6" cy="6" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="18" cy="18" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M7.5 7.5L10 10M14 14l2.5 2.5" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+            <p>Git Status</p>
+            <span>Select a project to view</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Notes Tab -->
+      <div class="tab-content" id="notes-tab">
+        <div class="notes-container">
+          <textarea
+            class="notes-editor"
+            id="notes-editor"
+            placeholder="Write notes, draft prompts, or save code snippets..."></textarea>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Quick Open Modal -->
+  <div class="quick-open-overlay" id="quick-open-overlay">
+    <div class="quick-open-modal">
+      <input type="text" class="quick-open-input" id="quick-open-input" placeholder="Search files...">
+      <div class="quick-open-results" id="quick-open-results">
+        <div class="quick-open-empty">Type to search for files</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global Search Modal -->
+  <div class="global-search-overlay" id="global-search-overlay">
+    <div class="global-search-modal">
+      <input type="text" class="global-search-input" id="global-search-input" placeholder="Search in project...">
+      <div class="global-search-results" id="global-search-results">
+        <div class="global-search-empty">Type to search across all files</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Settings Modal -->
+  <div class="settings-overlay" id="settings-overlay">
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h3 id="settings-title">Project Settings</h3>
+        <button class="settings-close" id="settings-close">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="settings-content">
+        <div class="settings-section">
+          <label class="settings-label">Project Name</label>
+          <input type="text" class="settings-input" id="settings-name" placeholder="Project name">
+        </div>
+        <div class="settings-section">
+          <label class="settings-label">Default Shell</label>
+          <select class="settings-select" id="settings-shell">
+            <option value="">System default</option>
+            <option value="/bin/zsh">Zsh (/bin/zsh)</option>
+            <option value="/bin/bash">Bash (/bin/bash)</option>
+            <option value="/bin/sh">Sh (/bin/sh)</option>
+          </select>
+          <p class="settings-hint">Shell used for new terminal tabs</p>
+        </div>
+        <div class="settings-section">
+          <label class="settings-label">Environment Variables</label>
+          <textarea class="settings-input" id="settings-env" rows="4" placeholder="KEY=value&#10;ANOTHER_KEY=value"></textarea>
+          <p class="settings-hint">One per line, format: KEY=value</p>
+        </div>
+        <div class="settings-section">
+          <label class="settings-label">Startup Command</label>
+          <input type="text" class="settings-input" id="settings-startup" placeholder="e.g., npm run dev">
+          <p class="settings-hint">Command to run when opening a new terminal</p>
+        </div>
+      </div>
+      <div class="settings-footer">
+        <button class="settings-btn settings-btn-danger" id="settings-remove">Remove Project</button>
+        <button class="settings-btn settings-btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="settings-btn settings-btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="bundle.js"></script>
+</body>
+</html>
