@@ -1935,3 +1935,142 @@ body {
 .update-btn.update-dismiss:hover {
   background: rgba(255, 255, 255, 0.1);
 }
+
+/* ===== Add Project Dropdown ===== */
+.add-project-wrapper {
+  position: relative;
+}
+
+.add-project-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 180px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-medium);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  display: none;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.add-project-dropdown.active {
+  display: flex;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.dropdown-item:hover {
+  background: var(--bg-hover);
+}
+
+.dropdown-item svg {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* ===== Folder Name Prompt Modal ===== */
+.prompt-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.prompt-modal.active {
+  display: flex;
+}
+
+.prompt-content {
+  width: 360px;
+  max-width: 90vw;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-medium);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  padding: 20px;
+}
+
+.prompt-content h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+
+.prompt-content input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  outline: none;
+  margin-bottom: 16px;
+}
+
+.prompt-content input:focus {
+  border-color: var(--accent);
+}
+
+.prompt-content input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.prompt-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.prompt-cancel {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.prompt-cancel:hover {
+  background: var(--bg-hover);
+}
+
+.prompt-create {
+  color: white;
+  background: var(--accent);
+}
+
+.prompt-create:hover {
+  background: var(--accent-hover);
+}

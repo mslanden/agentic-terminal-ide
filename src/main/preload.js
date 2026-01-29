@@ -7,6 +7,7 @@ let terminalExitListener = null;
 contextBridge.exposeInMainWorld('electronAPI', {
   // Folder selection
   selectFolder: () => ipcRenderer.invoke('select-folder'),
+  createProjectFolder: (parentPath, folderName) => ipcRenderer.invoke('create-project-folder', parentPath, folderName),
 
   // Terminal - multi-terminal support
   terminalCreate: (id, cwd, options = {}) => ipcRenderer.invoke('terminal-create', { id, cwd, ...options }),

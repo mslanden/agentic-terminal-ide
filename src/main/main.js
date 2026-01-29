@@ -121,6 +121,13 @@ ipcMain.handle('select-folder', async () => {
   return { path: folderPath, name: folderName };
 });
 
+// ===== Create Project Folder =====
+ipcMain.handle('create-project-folder', async (event, parentPath, folderName) => {
+  const newFolderPath = path.join(parentPath, folderName);
+  await fs.promises.mkdir(newFolderPath, { recursive: true });
+  return { path: newFolderPath, name: folderName };
+});
+
 // ===== Terminal (PTY) - Multi-terminal support =====
 ipcMain.handle('terminal-create', (event, { id, cwd, shell: customShell, env: customEnv, startup }) => {
   // Check if terminal already exists

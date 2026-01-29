@@ -1740,7 +1740,33 @@ function renderProjects(projects) {
   });
 }
 
-addProjectBtn.addEventListener('click', async () => {
+// ===== Add Project Dropdown =====
+const addProjectDropdown = document.getElementById('add-project-dropdown');
+const selectExistingBtn = document.getElementById('select-existing-btn');
+const createNewBtn = document.getElementById('create-new-btn');
+const folderNamePrompt = document.getElementById('folder-name-prompt');
+const newFolderNameInput = document.getElementById('new-folder-name');
+const promptCancelBtn = document.getElementById('prompt-cancel');
+const promptCreateBtn = document.getElementById('prompt-create');
+
+let pendingParentPath = null;
+
+// Toggle dropdown on "+" button click
+addProjectBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  addProjectDropdown.classList.toggle('active');
+});
+
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.add-project-wrapper')) {
+    addProjectDropdown.classList.remove('active');
+  }
+});
+
+// Select Existing Folder (original behavior)
+selectExistingBtn.addEventListener('click', async () => {
+  addProjectDropdown.classList.remove('active');
   const result = await window.electronAPI.selectFolder();
   if (result) {
     const projects = getProjects();
@@ -1752,6 +1778,73 @@ addProjectBtn.addEventListener('click', async () => {
     saveProjects(projects);
     renderProjects(projects);
     selectProject(result);
+  }
+});
+
+// Create New Project
+createNewBtn.addEventListener('click', async () => {
+  addProjectDropdown.classList.remove('active');
+
+  // First, select parent directory
+  const parentResult = await window.electronAPI.selectFolder();
+  if (!parentResult) return;
+
+  pendingParentPath = parentResult.path;
+
+  // Show prompt for folder name
+  folderNamePrompt.classList.add('active');
+  newFolderNameInput.value = '';
+  newFolderNameInput.focus();
+});
+
+// Prompt modal - Cancel
+promptCancelBtn.addEventListener('click', () => {
+  folderNamePrompt.classList.remove('active');
+  pendingParentPath = null;
+});
+
+// Close prompt when clicking outside
+folderNamePrompt.addEventListener('click', (e) => {
+  if (e.target === folderNamePrompt) {
+    folderNamePrompt.classList.remove('active');
+    pendingParentPath = null;
+  }
+});
+
+// Prompt modal - Create folder
+async function createNewProject() {
+  const folderName = newFolderNameInput.value.trim();
+  if (!folderName || !pendingParentPath) return;
+
+  try {
+    const result = await window.electronAPI.createProjectFolder(pendingParentPath, folderName);
+
+    // Add to projects
+    const projects = getProjects();
+    if (!projects.some(p => p.path === result.path)) {
+      projects.push(result);
+      saveProjects(projects);
+      renderProjects(projects);
+    }
+    selectProject(result);
+
+    folderNamePrompt.classList.remove('active');
+    pendingParentPath = null;
+  } catch (err) {
+    alert('Failed to create folder: ' + err.message);
+  }
+}
+
+promptCreateBtn.addEventListener('click', createNewProject);
+
+// Handle Enter key in folder name input
+newFolderNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    createNewProject();
+  } else if (e.key === 'Escape') {
+    folderNamePrompt.classList.remove('active');
+    pendingParentPath = null;
   }
 });
 
