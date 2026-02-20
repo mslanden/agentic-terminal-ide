@@ -308,7 +308,8 @@ ipcMain.handle('git-status', async (event, cwd) => {
   const files = {
     staged: [],
     unstaged: [],
-    untracked: []
+    untracked: [],
+    conflicted: []
   };
 
   if (status.success && status.output) {
@@ -318,7 +319,10 @@ ipcMain.handle('git-status', async (event, cwd) => {
       const workStatus = line[1];
       const fileName = line.substring(3);
 
-      if (indexStatus === '?' && workStatus === '?') {
+      // Detect conflicted files (UU, AA, DD, etc.)
+      if ((indexStatus === 'U' || workStatus === 'U') || (indexStatus === 'A' && workStatus === 'A') || (indexStatus === 'D' && workStatus === 'D')) {
+        files.conflicted.push({ name: fileName, status: `${indexStatus}${workStatus}` });
+      } else if (indexStatus === '?' && workStatus === '?') {
         files.untracked.push({ name: fileName, status: 'untracked' });
       } else {
         if (indexStatus !== ' ' && indexStatus !== '?') {
@@ -331,18 +335,24 @@ ipcMain.handle('git-status', async (event, cwd) => {
     }
   }
 
-  // Get recent commits
-  const log = await runGitCommand(cwd, ['log', '--oneline', '-5']);
-  const commits = log.success ? log.output.split('\n').filter(l => l).map(l => {
-    const [hash, ...msg] = l.split(' ');
-    return { hash, message: msg.join(' ') };
-  }) : [];
+  // Detect merge/rebase state
+  let mergeState = null;
+  const gitDir = isRepo.output || '.git';
+  const mergeHeadCheck = await runGitCommand(cwd, ['rev-parse', '--verify', 'MERGE_HEAD']);
+  if (mergeHeadCheck.success) {
+    mergeState = 'merging';
+  } else {
+    const rebaseCheck = await runGitCommand(cwd, ['rev-parse', '--verify', 'REBASE_HEAD']);
+    if (rebaseCheck.success) {
+      mergeState = 'rebasing';
+    }
+  }
 
   return {
     isRepo: true,
     branch: branch.output || 'HEAD',
     files,
-    commits
+    mergeState
   };
 });
 
@@ -457,6 +467,106 @@ ipcMain.handle('git-diff', async (event, { cwd, file, staged }) => {
 ipcMain.handle('git-diff-all', async (event, { cwd, staged }) => {
   const args = staged ? ['diff', '--cached'] : ['diff'];
   const result = await runGitCommand(cwd, args);
+  return result;
+});
+
+// ===== Git: Commit History =====
+ipcMain.handle('git-log', async (event, { cwd, skip = 0, limit = 20 }) => {
+  const result = await runGitCommand(cwd, [
+    'log', `--skip=${skip}`, `-${limit}`,
+    '--format=%H%n%an%n%aI%n%s', '--'
+  ]);
+  if (!result.success) return { success: false, commits: [] };
+  const lines = result.output.split('\n').filter(l => l);
+  const commits = [];
+  for (let i = 0; i + 3 < lines.length; i += 4) {
+    commits.push({ hash: lines[i], author: lines[i + 1], date: lines[i + 2], message: lines[i + 3] });
+  }
+  return { success: true, commits };
+});
+
+ipcMain.handle('git-show', async (event, { cwd, hash }) => {
+  const result = await runGitCommand(cwd, ['show', '--format=%H%n%an%n%aI%n%B', hash]);
+  return result;
+});
+
+// ===== Git: Stash Management =====
+ipcMain.handle('git-stash-list', async (event, cwd) => {
+  const result = await runGitCommand(cwd, ['stash', 'list', '--format=%gd|%gs']);
+  if (!result.success) return { success: true, stashes: [] };
+  const stashes = result.output ? result.output.split('\n').filter(l => l).map(l => {
+    const [index, ...msg] = l.split('|');
+    return { index, message: msg.join('|') };
+  }) : [];
+  return { success: true, stashes };
+});
+
+ipcMain.handle('git-stash-save', async (event, { cwd, message }) => {
+  const args = message ? ['stash', 'push', '-m', message] : ['stash', 'push'];
+  return await runGitCommand(cwd, args);
+});
+
+ipcMain.handle('git-stash-pop', async (event, { cwd, index }) => {
+  return await runGitCommand(cwd, ['stash', 'pop', index]);
+});
+
+ipcMain.handle('git-stash-apply', async (event, { cwd, index }) => {
+  return await runGitCommand(cwd, ['stash', 'apply', index]);
+});
+
+ipcMain.handle('git-stash-drop', async (event, { cwd, index }) => {
+  return await runGitCommand(cwd, ['stash', 'drop', index]);
+});
+
+// ===== Git: Tag Management =====
+ipcMain.handle('git-tag-list', async (event, cwd) => {
+  const result = await runGitCommand(cwd, ['tag', '-l', '--sort=-creatordate', '--format=%(refname:short)|%(objectname:short)|%(creatordate:iso)']);
+  if (!result.success) return { success: true, tags: [] };
+  const tags = result.output ? result.output.split('\n').filter(l => l).map(l => {
+    const [name, hash, date] = l.split('|');
+    return { name, hash, date };
+  }) : [];
+  return { success: true, tags };
+});
+
+ipcMain.handle('git-tag-create', async (event, { cwd, name, message }) => {
+  const args = message ? ['tag', '-a', name, '-m', message] : ['tag', name];
+  return await runGitCommand(cwd, args);
+});
+
+ipcMain.handle('git-tag-delete', async (event, { cwd, name }) => {
+  return await runGitCommand(cwd, ['tag', '-d', name]);
+});
+
+ipcMain.handle('git-tag-push', async (event, { cwd, name }) => {
+  const args = name === '--all' ? ['push', 'origin', '--tags'] : ['push', 'origin', name];
+  return await runGitCommand(cwd, args);
+});
+
+// ===== Git: Merge/Rebase =====
+ipcMain.handle('git-merge', async (event, { cwd, branch }) => {
+  return await runGitCommand(cwd, ['merge', branch]);
+});
+
+ipcMain.handle('git-merge-abort', async (event, cwd) => {
+  return await runGitCommand(cwd, ['merge', '--abort']);
+});
+
+ipcMain.handle('git-rebase', async (event, { cwd, branch }) => {
+  return await runGitCommand(cwd, ['rebase', branch]);
+});
+
+ipcMain.handle('git-rebase-continue', async (event, cwd) => {
+  return await runGitCommand(cwd, ['rebase', '--continue']);
+});
+
+ipcMain.handle('git-rebase-abort', async (event, cwd) => {
+  return await runGitCommand(cwd, ['rebase', '--abort']);
+});
+
+// ===== Git: Blame =====
+ipcMain.handle('git-blame', async (event, { cwd, file }) => {
+  const result = await runGitCommand(cwd, ['blame', '--porcelain', file]);
   return result;
 });
 

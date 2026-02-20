@@ -23,6 +23,9 @@ let currentPreviewFile = null;
 let currentPreviewContent = null;
 let currentPreviewMode = 'raw'; // 'raw' or 'live'
 
+// Diff viewer state
+let currentDiffMode = 'unified'; // 'unified' or 'split'
+
 // ===== Theme Management =====
 const THEME_KEY = 'programming-interface-theme';
 
@@ -881,8 +884,8 @@ async function loadGitStatus(projectPath) {
     return;
   }
 
-  const { branch, files, commits } = status;
-  const hasChanges = files.staged.length > 0 || files.unstaged.length > 0 || files.untracked.length > 0;
+  const { branch, files, mergeState } = status;
+  const hasChanges = files.staged.length > 0 || files.unstaged.length > 0 || files.untracked.length > 0 || files.conflicted.length > 0;
 
   // Fetch branches and remote status
   const branchData = await window.electronAPI.gitBranches(projectPath);
@@ -906,7 +909,13 @@ async function loadGitStatus(projectPath) {
             ${branches.map(b => `
               <div class="git-branch-item ${b === branch ? 'current' : ''}" data-branch="${b}">
                 <span class="check">${b === branch ? '✓' : ''}</span>
-                <span>${b}</span>
+                <span class="git-branch-item-name">${b}</span>
+                ${b !== branch ? `
+                  <div class="git-branch-item-actions">
+                    <button class="git-branch-merge-btn" data-branch="${b}" title="Merge into current">Merge</button>
+                    <button class="git-branch-rebase-btn" data-branch="${b}" title="Rebase onto this">Rebase</button>
+                  </div>
+                ` : ''}
               </div>
             `).join('')}
             <div class="git-branch-new">
@@ -949,6 +958,38 @@ async function loadGitStatus(projectPath) {
         </div>
       `}
   `;
+
+  // Merge/Rebase warning banner
+  if (mergeState) {
+    const isMerging = mergeState === 'merging';
+    html += `
+      <div class="git-merge-banner ${mergeState}">
+        <span class="git-merge-banner-text">${isMerging ? 'Merge in progress' : 'Rebase in progress'}</span>
+        <div class="git-merge-banner-actions">
+          ${!isMerging ? '<button class="git-merge-banner-btn continue" data-action="rebase-continue">Continue</button>' : ''}
+          <button class="git-merge-banner-btn abort" data-action="${isMerging ? 'merge-abort' : 'rebase-abort'}">Abort</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // Conflicted files
+  if (files.conflicted.length > 0) {
+    html += `
+      <div class="git-section">
+        <div class="git-section-header"><span>Conflicts (${files.conflicted.length})</span></div>
+        <div class="git-files">
+          ${files.conflicted.map(f => `
+            <div class="git-file conflicted">
+              <span class="git-status">${f.status}</span>
+              <span class="git-filename">${f.name}</span>
+              <button class="git-file-action resolve" data-action="stage" data-file="${f.name}" title="Mark Resolved">&#10003;</button>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
 
   // Staged changes
   if (files.staged.length > 0) {
@@ -1035,25 +1076,63 @@ async function loadGitStatus(projectPath) {
     `;
   }
 
-  // Recent commits
-  if (commits.length > 0) {
-    html += `
-      <div class="git-section">
-        <div class="git-section-header"><span>Recent Commits</span></div>
-        <div class="git-commits">
-          ${commits.map(c => `
-            <div class="git-commit">
-              <span class="git-hash">${c.hash}</span>
-              <span class="git-message">${c.message}</span>
-            </div>
-          `).join('')}
+  // Stash section
+  html += `
+    <div class="git-section git-stash-section">
+      <div class="git-section-header">
+        <span>Stashes</span>
+        <div class="git-stash-actions-header">
+          <button class="git-action-btn git-stash-save-btn" title="Stash changes">+</button>
         </div>
       </div>
-    `;
-  }
+      <div class="git-stash-save-form" id="git-stash-form" style="display:none;">
+        <input type="text" class="git-stash-input" id="git-stash-message" placeholder="Stash message (optional)...">
+        <button class="git-stash-confirm" id="git-stash-confirm">Save</button>
+      </div>
+      <div class="git-stash-list" id="git-stash-list">
+        <div class="loading" style="font-size:11px;">Loading...</div>
+      </div>
+    </div>
+  `;
+
+  // Tags section
+  html += `
+    <div class="git-section git-tags-section">
+      <div class="git-section-header">
+        <span>Tags</span>
+        <div class="git-tags-actions-header">
+          <button class="git-action-btn git-tag-create-btn" title="Create tag">+</button>
+          ${remoteStatus.hasRemote ? '<button class="git-action-btn git-tag-push-all-btn" title="Push all tags">&#8593;</button>' : ''}
+        </div>
+      </div>
+      <div class="git-tag-create-form" id="git-tag-form" style="display:none;">
+        <input type="text" class="git-tag-input" id="git-tag-name" placeholder="Tag name...">
+        <input type="text" class="git-tag-input" id="git-tag-message" placeholder="Message (optional, for annotated)...">
+        <button class="git-tag-confirm" id="git-tag-confirm">Create</button>
+      </div>
+      <div class="git-tag-list" id="git-tag-list">
+        <div class="loading" style="font-size:11px;">Loading...</div>
+      </div>
+    </div>
+  `;
+
+  // Recent commits (paginated)
+  html += `
+    <div class="git-section">
+      <div class="git-section-header"><span>Commits</span></div>
+      <div class="git-commits-scroll" id="git-commits-scroll">
+        <div class="loading" style="font-size:11px;">Loading...</div>
+      </div>
+    </div>
+  `;
 
   html += '</div>';
   gitPanel.innerHTML = html;
+
+  // Load async sections
+  loadCommitHistory(projectPath);
+  loadStashList(projectPath);
+  loadTagList(projectPath);
 
   // Add event listeners
   attachGitEventListeners(projectPath);
@@ -1263,6 +1342,407 @@ function attachGitEventListeners(projectPath) {
       await showGitDiff(projectPath, fileName, isStaged);
     });
   });
+
+  // Merge/Rebase banner actions
+  gitPanel.querySelectorAll('.git-merge-banner-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.action;
+      let result;
+      if (action === 'merge-abort') result = await window.electronAPI.gitMergeAbort(projectPath);
+      else if (action === 'rebase-abort') result = await window.electronAPI.gitRebaseAbort(projectPath);
+      else if (action === 'rebase-continue') result = await window.electronAPI.gitRebaseContinue(projectPath);
+      if (result && !result.success) alert('Failed: ' + result.error);
+      loadGitStatus(projectPath);
+    });
+  });
+
+  // Merge/Rebase from branch dropdown
+  gitPanel.querySelectorAll('.git-branch-merge-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const branchName = btn.dataset.branch;
+      const result = await window.electronAPI.gitMerge(projectPath, branchName);
+      if (!result.success) alert('Merge failed: ' + result.error);
+      gitPanel.querySelector('#git-branch-dropdown')?.classList.remove('active');
+      loadGitStatus(projectPath);
+    });
+  });
+
+  gitPanel.querySelectorAll('.git-branch-rebase-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const branchName = btn.dataset.branch;
+      const result = await window.electronAPI.gitRebase(projectPath, branchName);
+      if (!result.success) alert('Rebase failed: ' + result.error);
+      gitPanel.querySelector('#git-branch-dropdown')?.classList.remove('active');
+      loadGitStatus(projectPath);
+    });
+  });
+
+  // Stash section
+  const stashSaveBtn = gitPanel.querySelector('.git-stash-save-btn');
+  const stashForm = gitPanel.querySelector('#git-stash-form');
+  if (stashSaveBtn && stashForm) {
+    stashSaveBtn.addEventListener('click', () => {
+      stashForm.style.display = stashForm.style.display === 'none' ? 'flex' : 'none';
+    });
+  }
+
+  const stashConfirm = gitPanel.querySelector('#git-stash-confirm');
+  if (stashConfirm) {
+    stashConfirm.addEventListener('click', async () => {
+      const msg = gitPanel.querySelector('#git-stash-message').value.trim();
+      const result = await window.electronAPI.gitStashSave(projectPath, msg || null);
+      if (!result.success) { alert('Stash failed: ' + result.error); return; }
+      stashForm.style.display = 'none';
+      gitPanel.querySelector('#git-stash-message').value = '';
+      loadStashList(projectPath);
+      loadGitStatus(projectPath);
+    });
+  }
+
+  // Tag section
+  const tagCreateBtn = gitPanel.querySelector('.git-tag-create-btn');
+  const tagForm = gitPanel.querySelector('#git-tag-form');
+  if (tagCreateBtn && tagForm) {
+    tagCreateBtn.addEventListener('click', () => {
+      tagForm.style.display = tagForm.style.display === 'none' ? 'flex' : 'none';
+    });
+  }
+
+  const tagConfirm = gitPanel.querySelector('#git-tag-confirm');
+  if (tagConfirm) {
+    tagConfirm.addEventListener('click', async () => {
+      const name = gitPanel.querySelector('#git-tag-name').value.trim();
+      if (!name) return;
+      const msg = gitPanel.querySelector('#git-tag-message').value.trim();
+      const result = await window.electronAPI.gitTagCreate(projectPath, name, msg || null);
+      if (!result.success) { alert('Tag creation failed: ' + result.error); return; }
+      tagForm.style.display = 'none';
+      gitPanel.querySelector('#git-tag-name').value = '';
+      gitPanel.querySelector('#git-tag-message').value = '';
+      loadTagList(projectPath);
+    });
+  }
+
+  const tagPushAllBtn = gitPanel.querySelector('.git-tag-push-all-btn');
+  if (tagPushAllBtn) {
+    tagPushAllBtn.addEventListener('click', async () => {
+      const result = await window.electronAPI.gitTagPush(projectPath, '--all');
+      if (!result.success) alert('Push tags failed: ' + result.error);
+    });
+  }
+}
+
+// ===== Commit History (Paginated) =====
+let commitHistorySkip = 0;
+
+async function loadCommitHistory(projectPath, append = false) {
+  const container = document.getElementById('git-commits-scroll');
+  if (!container) return;
+
+  if (!append) {
+    commitHistorySkip = 0;
+    container.innerHTML = '<div class="loading" style="font-size:11px;">Loading...</div>';
+  }
+
+  const result = await window.electronAPI.gitLog(projectPath, commitHistorySkip, 20);
+  if (!result.success) {
+    if (!append) container.innerHTML = '<div class="git-clean">No commits yet</div>';
+    return;
+  }
+
+  if (!append) container.innerHTML = '';
+
+  // Remove existing load-more button
+  container.querySelector('.git-load-more')?.remove();
+
+  for (const c of result.commits) {
+    const div = document.createElement('div');
+    div.className = 'git-commit clickable';
+    div.innerHTML = `
+      <span class="git-hash">${c.hash.substring(0, 7)}</span>
+      <span class="git-message">${escapeHtml(c.message)}</span>
+      <span class="git-commit-meta">${c.author} &middot; ${formatRelativeDate(c.date)}</span>
+    `;
+    div.addEventListener('click', () => showCommitDetail(projectPath, c.hash));
+    container.appendChild(div);
+  }
+
+  commitHistorySkip += result.commits.length;
+
+  // Add load more button if we got a full page
+  if (result.commits.length >= 20) {
+    const loadMore = document.createElement('button');
+    loadMore.className = 'git-load-more';
+    loadMore.textContent = 'Load more...';
+    loadMore.addEventListener('click', () => loadCommitHistory(projectPath, true));
+    container.appendChild(loadMore);
+  }
+}
+
+async function showCommitDetail(projectPath, hash) {
+  const result = await window.electronAPI.gitShow(projectPath, hash);
+  const previewTab = document.getElementById('preview-tab');
+
+  // Switch to preview tab
+  document.querySelectorAll('.context-tabs .tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="preview"]').classList.add('active');
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  previewTab.classList.add('active');
+
+  if (!result.success || !result.output) {
+    previewTab.innerHTML = `<div class="file-preview"><div class="preview-header"><span class="preview-filename">Commit ${hash.substring(0, 7)}</span></div><div class="diff-empty">Could not load commit</div></div>`;
+    return;
+  }
+
+  // Split header from diff content
+  const output = result.output;
+  const diffStart = output.indexOf('\ndiff --git');
+  const header = diffStart !== -1 ? output.substring(0, diffStart) : output;
+  const diffText = diffStart !== -1 ? output.substring(diffStart + 1) : '';
+
+  // Parse header lines
+  const headerLines = header.split('\n');
+  const commitHash = headerLines[0] || hash;
+  const author = headerLines[1] || '';
+  const date = headerLines[2] || '';
+  const message = headerLines.slice(3).join('\n').trim();
+
+  let html = `
+    <div class="file-preview">
+      <div class="preview-header">
+        <span class="preview-filename">Commit ${commitHash.substring(0, 7)}</span>
+      </div>
+      <div class="commit-detail">
+        <div class="commit-detail-header">
+          <div class="commit-detail-hash">${commitHash.substring(0, 10)}</div>
+          <div class="commit-detail-meta">${escapeHtml(author)} &middot; ${formatRelativeDate(date)}</div>
+          <div class="commit-detail-message">${escapeHtml(message)}</div>
+        </div>
+  `;
+
+  if (diffText) {
+    renderDiffView(previewTab, diffText, `Commit ${commitHash.substring(0, 7)}`);
+    // Prepend the commit detail header
+    const viewer = previewTab.querySelector('.file-preview');
+    if (viewer) {
+      const detailDiv = document.createElement('div');
+      detailDiv.className = 'commit-detail-header';
+      detailDiv.innerHTML = `
+        <div class="commit-detail-hash">${commitHash.substring(0, 10)}</div>
+        <div class="commit-detail-meta">${escapeHtml(author)} &middot; ${formatRelativeDate(date)}</div>
+        <div class="commit-detail-message">${escapeHtml(message)}</div>
+      `;
+      const diffViewer = viewer.querySelector('.diff-viewer');
+      if (diffViewer) viewer.insertBefore(detailDiv, diffViewer);
+    }
+  } else {
+    html += '<div class="diff-empty">No diff content</div></div></div>';
+    previewTab.innerHTML = html;
+  }
+}
+
+function formatRelativeDate(dateStr) {
+  if (!dateStr) return '';
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diff = now - date;
+  const seconds = Math.floor(diff / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const weeks = Math.floor(days / 7);
+  const months = Math.floor(days / 30);
+
+  if (seconds < 60) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  if (days < 7) return `${days}d ago`;
+  if (weeks < 5) return `${weeks}w ago`;
+  if (months < 12) return `${months}mo ago`;
+  return date.toLocaleDateString();
+}
+
+// ===== Stash List =====
+async function loadStashList(projectPath) {
+  const container = document.getElementById('git-stash-list');
+  if (!container) return;
+
+  const result = await window.electronAPI.gitStashList(projectPath);
+  if (!result.success || result.stashes.length === 0) {
+    container.innerHTML = '<div class="git-clean" style="font-size:11px;padding:6px;">No stashes</div>';
+    return;
+  }
+
+  container.innerHTML = result.stashes.map(s => `
+    <div class="git-stash-item">
+      <span class="git-stash-index">${s.index}</span>
+      <span class="git-stash-message">${escapeHtml(s.message)}</span>
+      <div class="git-stash-actions">
+        <button class="git-stash-action" data-action="apply" data-index="${s.index}" title="Apply">&#8631;</button>
+        <button class="git-stash-action" data-action="pop" data-index="${s.index}" title="Pop">&#8593;</button>
+        <button class="git-stash-action discard" data-action="drop" data-index="${s.index}" title="Drop">&#215;</button>
+      </div>
+    </div>
+  `).join('');
+
+  container.querySelectorAll('.git-stash-action').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.action;
+      const index = btn.dataset.index;
+      let result;
+      if (action === 'apply') result = await window.electronAPI.gitStashApply(projectPath, index);
+      else if (action === 'pop') result = await window.electronAPI.gitStashPop(projectPath, index);
+      else if (action === 'drop') {
+        if (!confirm(`Drop ${index}?`)) return;
+        result = await window.electronAPI.gitStashDrop(projectPath, index);
+      }
+      if (result && !result.success) alert('Stash action failed: ' + result.error);
+      loadStashList(projectPath);
+      loadGitStatus(projectPath);
+    });
+  });
+}
+
+// ===== Tag List =====
+async function loadTagList(projectPath) {
+  const container = document.getElementById('git-tag-list');
+  if (!container) return;
+
+  const result = await window.electronAPI.gitTagList(projectPath);
+  if (!result.success || result.tags.length === 0) {
+    container.innerHTML = '<div class="git-clean" style="font-size:11px;padding:6px;">No tags</div>';
+    return;
+  }
+
+  container.innerHTML = result.tags.map(t => `
+    <div class="git-tag-item">
+      <span class="git-tag-name">${escapeHtml(t.name)}</span>
+      <span class="git-tag-hash">${t.hash}</span>
+      <div class="git-tag-actions">
+        <button class="git-tag-action" data-action="push" data-name="${escapeHtml(t.name)}" title="Push">&#8593;</button>
+        <button class="git-tag-action discard" data-action="delete" data-name="${escapeHtml(t.name)}" title="Delete">&#215;</button>
+      </div>
+    </div>
+  `).join('');
+
+  container.querySelectorAll('.git-tag-action').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.action;
+      const name = btn.dataset.name;
+      let result;
+      if (action === 'push') {
+        result = await window.electronAPI.gitTagPush(projectPath, name);
+      } else if (action === 'delete') {
+        if (!confirm(`Delete tag "${name}"?`)) return;
+        result = await window.electronAPI.gitTagDelete(projectPath, name);
+      }
+      if (result && !result.success) alert('Tag action failed: ' + result.error);
+      loadTagList(projectPath);
+    });
+  });
+}
+
+// ===== Blame View =====
+async function showBlameView(filePath) {
+  if (!currentProject) return;
+
+  const previewTab = document.getElementById('preview-tab');
+  const relativePath = filePath.startsWith(currentProject.path)
+    ? filePath.substring(currentProject.path.length + 1) : filePath;
+
+  const result = await window.electronAPI.gitBlame(currentProject.path, relativePath);
+
+  if (!result.success || !result.output) {
+    // Not in git or no blame data — do nothing
+    return null;
+  }
+
+  // Parse porcelain blame output
+  const lines = result.output.split('\n');
+  const blameData = [];
+  let currentEntry = null;
+  let lineContent = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.match(/^[0-9a-f]{40}\s/)) {
+      const parts = line.split(' ');
+      currentEntry = {
+        hash: parts[0],
+        origLine: parseInt(parts[1]),
+        finalLine: parseInt(parts[2]),
+        author: '',
+        date: ''
+      };
+    } else if (line.startsWith('author ') && currentEntry) {
+      currentEntry.author = line.substring(7);
+    } else if (line.startsWith('author-time ') && currentEntry) {
+      const timestamp = parseInt(line.substring(12));
+      currentEntry.date = new Date(timestamp * 1000).toISOString();
+    } else if (line.startsWith('\t') && currentEntry) {
+      lineContent = line.substring(1);
+      blameData.push({ ...currentEntry, content: lineContent });
+      currentEntry = null;
+    }
+  }
+
+  return blameData;
+}
+
+function renderBlameView(previewTab, blameData, fileName, extension) {
+  let html = `
+    <div class="file-preview">
+      <div class="preview-header">
+        <span class="preview-filename">${escapeHtml(fileName)}</span>
+        <div class="preview-mode-toggle">
+          <button class="preview-mode-btn blame-toggle active" data-mode="blame">Blame</button>
+          <button class="preview-mode-btn blame-toggle" data-mode="raw">Raw</button>
+        </div>
+      </div>
+      <div class="blame-viewer">
+        <table class="blame-table">
+  `;
+
+  for (const entry of blameData) {
+    const shortHash = entry.hash.substring(0, 7);
+    const isUncommitted = entry.hash === '0000000000000000000000000000000000000000';
+    const annotation = isUncommitted
+      ? '<span class="blame-uncommitted">Not committed</span>'
+      : `<span class="blame-hash clickable" data-hash="${entry.hash}">${shortHash}</span>
+         <span class="blame-author">${escapeHtml(entry.author)}</span>
+         <span class="blame-date">${formatRelativeDate(entry.date)}</span>`;
+
+    const highlighted = highlightCode(entry.content, extension);
+
+    html += `
+      <tr class="blame-line">
+        <td class="blame-annotation">${annotation}</td>
+        <td class="blame-ln">${entry.finalLine}</td>
+        <td class="blame-code"><code class="hljs">${highlighted}</code></td>
+      </tr>
+    `;
+  }
+
+  html += '</table></div></div>';
+  previewTab.innerHTML = html;
+
+  // Mode toggle to switch back to raw
+  previewTab.querySelectorAll('.blame-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.mode === 'raw') {
+        renderPreview();
+      }
+    });
+  });
+
+  // Clickable hashes
+  previewTab.querySelectorAll('.blame-hash.clickable').forEach(el => {
+    el.addEventListener('click', () => {
+      showCommitDetail(currentProject.path, el.dataset.hash);
+    });
+  });
 }
 
 async function showGitDiff(projectPath, fileName, staged = false) {
@@ -1287,44 +1767,179 @@ async function showGitDiff(projectPath, fileName, staged = false) {
     return;
   }
 
-  const diffHtml = renderDiff(result.output);
-  previewTab.innerHTML = `
+  renderDiffView(previewTab, result.output, `${fileName} (${staged ? 'staged' : 'unstaged'})`);
+}
+
+function renderDiffView(container, diffText, title) {
+  const parsed = parseDiff(diffText);
+  const diffHtml = currentDiffMode === 'split' ? renderSplitDiff(parsed) : renderUnifiedDiff(parsed);
+
+  container.innerHTML = `
     <div class="file-preview">
       <div class="preview-header">
-        <span class="preview-filename">${fileName} (${staged ? 'staged' : 'unstaged'})</span>
+        <span class="preview-filename">${escapeHtml(title)}</span>
+        <div class="diff-controls">
+          <div class="diff-nav">
+            <button class="diff-nav-btn" id="diff-prev-hunk" title="Previous hunk">&#9650;</button>
+            <button class="diff-nav-btn" id="diff-next-hunk" title="Next hunk">&#9660;</button>
+          </div>
+          <div class="diff-mode-toggle">
+            <button class="diff-mode-btn ${currentDiffMode === 'unified' ? 'active' : ''}" data-mode="unified">Unified</button>
+            <button class="diff-mode-btn ${currentDiffMode === 'split' ? 'active' : ''}" data-mode="split">Split</button>
+          </div>
+        </div>
       </div>
       <div class="diff-viewer">${diffHtml}</div>
     </div>
   `;
+
+  // Mode toggle
+  container.querySelectorAll('.diff-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentDiffMode = btn.dataset.mode;
+      renderDiffView(container, diffText, title);
+    });
+  });
+
+  // Hunk navigation
+  const viewer = container.querySelector('.diff-viewer');
+  container.querySelector('#diff-prev-hunk')?.addEventListener('click', () => navigateHunk(viewer, -1));
+  container.querySelector('#diff-next-hunk')?.addEventListener('click', () => navigateHunk(viewer, 1));
 }
 
-function renderDiff(diffText) {
+function navigateHunk(viewer, direction) {
+  const hunks = viewer.querySelectorAll('.diff-hunk-header');
+  if (hunks.length === 0) return;
+
+  const viewerRect = viewer.getBoundingClientRect();
+  const scrollTop = viewer.scrollTop;
+  let targetIndex = -1;
+
+  if (direction > 0) {
+    // Find next hunk below current scroll position
+    for (let i = 0; i < hunks.length; i++) {
+      const hunkTop = hunks[i].offsetTop;
+      if (hunkTop > scrollTop + 10) {
+        targetIndex = i;
+        break;
+      }
+    }
+    if (targetIndex === -1) targetIndex = hunks.length - 1;
+  } else {
+    // Find previous hunk above current scroll position
+    for (let i = hunks.length - 1; i >= 0; i--) {
+      const hunkTop = hunks[i].offsetTop;
+      if (hunkTop < scrollTop - 10) {
+        targetIndex = i;
+        break;
+      }
+    }
+    if (targetIndex === -1) targetIndex = 0;
+  }
+
+  hunks[targetIndex].scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function parseDiff(diffText) {
   const lines = diffText.split('\n');
-  let html = '';
-  let inHunk = false;
+  const hunks = [];
+  let currentHunk = null;
 
   for (const line of lines) {
-    if (line.startsWith('diff --git')) {
-      // Skip diff header
+    if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
       continue;
-    } else if (line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
-      // Skip these headers
-      continue;
-    } else if (line.startsWith('@@')) {
-      html += `<div class="diff-hunk-header">${escapeHtml(line)}</div>`;
-      inHunk = true;
-    } else if (inHunk) {
+    }
+    if (line.startsWith('@@')) {
+      // Parse @@ -oldStart,oldCount +newStart,newCount @@
+      const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/);
+      const oldStart = match ? parseInt(match[1]) : 1;
+      const newStart = match ? parseInt(match[2]) : 1;
+      currentHunk = { header: line, oldStart, newStart, lines: [] };
+      hunks.push(currentHunk);
+    } else if (currentHunk) {
       if (line.startsWith('+')) {
-        html += `<div class="diff-line addition">${escapeHtml(line)}</div>`;
+        currentHunk.lines.push({ type: 'add', text: line });
       } else if (line.startsWith('-')) {
-        html += `<div class="diff-line deletion">${escapeHtml(line)}</div>`;
+        currentHunk.lines.push({ type: 'del', text: line });
       } else {
-        html += `<div class="diff-line context">${escapeHtml(line)}</div>`;
+        currentHunk.lines.push({ type: 'ctx', text: line });
       }
     }
   }
+  return hunks;
+}
 
-  return html || '<div class="diff-empty">No diff content</div>';
+function renderUnifiedDiff(hunks) {
+  if (hunks.length === 0) return '<div class="diff-empty">No diff content</div>';
+
+  let html = '<table class="diff-table unified">';
+  for (const hunk of hunks) {
+    html += `<tr class="diff-hunk-header"><td colspan="3">${escapeHtml(hunk.header)}</td></tr>`;
+    let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
+
+    for (const l of hunk.lines) {
+      if (l.type === 'add') {
+        html += `<tr class="diff-line addition"><td class="diff-ln"></td><td class="diff-ln">${newLine++}</td><td class="diff-text">${escapeHtml(l.text)}</td></tr>`;
+      } else if (l.type === 'del') {
+        html += `<tr class="diff-line deletion"><td class="diff-ln">${oldLine++}</td><td class="diff-ln"></td><td class="diff-text">${escapeHtml(l.text)}</td></tr>`;
+      } else {
+        html += `<tr class="diff-line context"><td class="diff-ln">${oldLine++}</td><td class="diff-ln">${newLine++}</td><td class="diff-text">${escapeHtml(l.text)}</td></tr>`;
+      }
+    }
+  }
+  html += '</table>';
+  return html;
+}
+
+function renderSplitDiff(hunks) {
+  if (hunks.length === 0) return '<div class="diff-empty">No diff content</div>';
+
+  let html = '<table class="diff-table split">';
+  for (const hunk of hunks) {
+    html += `<tr class="diff-hunk-header"><td colspan="6">${escapeHtml(hunk.header)}</td></tr>`;
+    let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
+
+    // Pair deletions and additions for side-by-side
+    const rows = [];
+    let i = 0;
+    const lines = hunk.lines;
+
+    while (i < lines.length) {
+      if (lines[i].type === 'ctx') {
+        rows.push({ left: { type: 'ctx', ln: oldLine++, text: lines[i].text }, right: { type: 'ctx', ln: newLine++, text: lines[i].text } });
+        i++;
+      } else {
+        // Collect consecutive del/add blocks
+        const dels = [];
+        const adds = [];
+        while (i < lines.length && lines[i].type === 'del') { dels.push(lines[i]); i++; }
+        while (i < lines.length && lines[i].type === 'add') { adds.push(lines[i]); i++; }
+        const max = Math.max(dels.length, adds.length);
+        for (let j = 0; j < max; j++) {
+          rows.push({
+            left: j < dels.length ? { type: 'del', ln: oldLine++, text: dels[j].text } : { type: 'empty', ln: '', text: '' },
+            right: j < adds.length ? { type: 'add', ln: newLine++, text: adds[j].text } : { type: 'empty', ln: '', text: '' }
+          });
+        }
+      }
+    }
+
+    for (const row of rows) {
+      const leftClass = row.left.type === 'del' ? 'deletion' : row.left.type === 'empty' ? 'empty' : 'context';
+      const rightClass = row.right.type === 'add' ? 'addition' : row.right.type === 'empty' ? 'empty' : 'context';
+      html += `<tr class="diff-line split-row">
+        <td class="diff-ln ${leftClass}">${row.left.ln}</td>
+        <td class="diff-text ${leftClass}">${escapeHtml(row.left.text)}</td>
+        <td class="diff-split-gutter"></td>
+        <td class="diff-ln ${rightClass}">${row.right.ln}</td>
+        <td class="diff-text ${rightClass}">${escapeHtml(row.right.text)}</td>
+      </tr>`;
+    }
+  }
+  html += '</table>';
+  return html;
 }
 
 function escapeHtml(text) {
@@ -1533,18 +2148,22 @@ function renderPreview() {
   }
 
   const showLive = canShowLivePreview(extension);
+  const showBlameBtn = currentProject && !isImage;
 
   // Build header with mode toggle
   let html = `
     <div class="file-preview">
       <div class="preview-header">
         <span class="preview-filename">${name}</span>
-        ${showLive ? `
-          <div class="preview-mode-toggle">
-            <button class="preview-mode-btn ${currentPreviewMode === 'raw' ? 'active' : ''}" data-mode="raw">Raw</button>
-            <button class="preview-mode-btn ${currentPreviewMode === 'live' ? 'active' : ''}" data-mode="live">Live</button>
-          </div>
-        ` : ''}
+        <div class="preview-header-actions">
+          ${showBlameBtn ? '<button class="preview-mode-btn blame-btn" id="preview-blame-btn">Blame</button>' : ''}
+          ${showLive ? `
+            <div class="preview-mode-toggle">
+              <button class="preview-mode-btn ${currentPreviewMode === 'raw' ? 'active' : ''}" data-mode="raw">Raw</button>
+              <button class="preview-mode-btn ${currentPreviewMode === 'live' ? 'active' : ''}" data-mode="live">Live</button>
+            </div>
+          ` : ''}
+        </div>
       </div>
   `;
 
@@ -1572,12 +2191,23 @@ function renderPreview() {
   previewTab.innerHTML = html;
 
   // Add mode toggle listeners
-  previewTab.querySelectorAll('.preview-mode-btn').forEach(btn => {
+  previewTab.querySelectorAll('.preview-mode-btn[data-mode]').forEach(btn => {
     btn.addEventListener('click', () => {
       currentPreviewMode = btn.dataset.mode;
       renderPreview();
     });
   });
+
+  // Blame button
+  const blameBtn = previewTab.querySelector('#preview-blame-btn');
+  if (blameBtn) {
+    blameBtn.addEventListener('click', async () => {
+      const blameData = await showBlameView(currentPreviewFile);
+      if (blameData) {
+        renderBlameView(previewTab, blameData, name, extension);
+      }
+    });
+  }
 
   // Set iframe content for HTML files
   if (currentPreviewMode === 'live' && (extension.toLowerCase() === '.html' || extension.toLowerCase() === '.htm')) {

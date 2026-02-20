@@ -54,6 +54,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitPull: (cwd) => ipcRenderer.invoke('git-pull', cwd),
   gitRemoteStatus: (cwd) => ipcRenderer.invoke('git-remote-status', cwd),
 
+  // Commit history
+  gitLog: (cwd, skip = 0, limit = 20) => ipcRenderer.invoke('git-log', { cwd, skip, limit }),
+  gitShow: (cwd, hash) => ipcRenderer.invoke('git-show', { cwd, hash }),
+
+  // Stash
+  gitStashList: (cwd) => ipcRenderer.invoke('git-stash-list', cwd),
+  gitStashSave: (cwd, message) => ipcRenderer.invoke('git-stash-save', { cwd, message }),
+  gitStashPop: (cwd, index) => ipcRenderer.invoke('git-stash-pop', { cwd, index }),
+  gitStashApply: (cwd, index) => ipcRenderer.invoke('git-stash-apply', { cwd, index }),
+  gitStashDrop: (cwd, index) => ipcRenderer.invoke('git-stash-drop', { cwd, index }),
+
+  // Tags
+  gitTagList: (cwd) => ipcRenderer.invoke('git-tag-list', cwd),
+  gitTagCreate: (cwd, name, message) => ipcRenderer.invoke('git-tag-create', { cwd, name, message }),
+  gitTagDelete: (cwd, name) => ipcRenderer.invoke('git-tag-delete', { cwd, name }),
+  gitTagPush: (cwd, name) => ipcRenderer.invoke('git-tag-push', { cwd, name }),
+
+  // Merge/Rebase
+  gitMerge: (cwd, branch) => ipcRenderer.invoke('git-merge', { cwd, branch }),
+  gitMergeAbort: (cwd) => ipcRenderer.invoke('git-merge-abort', cwd),
+  gitRebase: (cwd, branch) => ipcRenderer.invoke('git-rebase', { cwd, branch }),
+  gitRebaseContinue: (cwd) => ipcRenderer.invoke('git-rebase-continue', cwd),
+  gitRebaseAbort: (cwd) => ipcRenderer.invoke('git-rebase-abort', cwd),
+
+  // Blame
+  gitBlame: (cwd, file) => ipcRenderer.invoke('git-blame', { cwd, file }),
+
   // Search
   searchProject: (cwd, query) => ipcRenderer.invoke('search-project', { cwd, query }),
 
