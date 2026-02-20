@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self' data: blob:">
+  <title>Panel</title>
+  <link rel="stylesheet" href="styles/main.css">
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    .panel-window-header {
+      padding-top: 28px; /* Space for macOS traffic lights */
+    }
+  </style>
+</head>
+<body>
+  <div class="panel-window-header">
+    <h3 id="panel-title">Panel</h3>
+  </div>
+  <div class="panel-window-content" id="panel-content">
+    <div class="empty-state">
+      <p>Loading...</p>
+    </div>
+  </div>
+  <script src="panel-window-bundle.js"></script>
+</body>
+</html>

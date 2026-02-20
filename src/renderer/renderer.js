@@ -19,6 +19,19 @@ let activeTerminalId = null;
 let listenersInitialized = false;
 let terminalCounter = 0;
 
+// ===== DataStore Cache (loaded from disk at startup) =====
+let cachedProjects = [];
+let cachedProjectSettings = {};
+let cachedSessions = {};
+let cachedNotes = {};
+let cachedProfiles = { profiles: [], active: 'Default' };
+let cachedPreferences = { theme: 'light', customShortcuts: {} };
+
+// Workspace state
+let workspaceProjects = [];
+let workspaceExpandedFolders = new Map(); // projectPath -> Set of expanded paths
+let workspaceFileTreeData = new Map(); // projectPath -> Map of path -> children
+
 // Preview state
 let currentPreviewFile = null;
 let currentPreviewContent = null;
@@ -37,11 +50,12 @@ let capturingShortcutId = null;
 const CUSTOM_SHORTCUTS_KEY = 'programming-interface-custom-shortcuts';
 
 function getCustomShortcuts() {
-  return JSON.parse(localStorage.getItem(CUSTOM_SHORTCUTS_KEY) || '{}');
+  return cachedPreferences.customShortcuts || {};
 }
 
 function saveCustomShortcuts(shortcuts) {
-  localStorage.setItem(CUSTOM_SHORTCUTS_KEY, JSON.stringify(shortcuts));
+  cachedPreferences.customShortcuts = shortcuts;
+  window.electronAPI.storeWrite('preferences.json', cachedPreferences);
 }
 
 // ===== Shortcut Registry =====
@@ -74,6 +88,9 @@ const SHORTCUT_REGISTRY = [
   { id: 'add-project', label: 'Add Project', category: 'Project', defaultBinding: null, action: () => { document.getElementById('add-project-btn').click(); } },
   { id: 'project-settings', label: 'Project Settings', category: 'Project', defaultBinding: null, action: () => { if (currentProject) openProjectSettings(currentProject.path); } },
   { id: 'select-profile', label: 'Select Profile', category: 'Terminal', defaultBinding: null, action: () => { document.getElementById('profile-btn').click(); } },
+  // Data
+  { id: 'export-settings', label: 'Export All Settings', category: 'Data', defaultBinding: null, action: () => { document.getElementById('settings-export').click(); } },
+  { id: 'import-settings', label: 'Import Settings', category: 'Data', defaultBinding: null, action: () => { document.getElementById('settings-import').click(); } },
 ];
 
 function getEffectiveBinding(id) {
@@ -160,12 +177,13 @@ const darkTerminalTheme = {
 };
 
 function getCurrentTheme() {
-  return localStorage.getItem(THEME_KEY) || 'light';
+  return cachedPreferences.theme || 'light';
 }
 
 function setTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem(THEME_KEY, theme);
+  cachedPreferences.theme = theme;
+  window.electronAPI.storeWrite('preferences.json', cachedPreferences);
 
   // Update all terminal themes
   const terminalTheme = theme === 'dark' ? darkTerminalTheme : lightTerminalTheme;
@@ -186,7 +204,7 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
   setTheme(currentTheme === 'light' ? 'dark' : 'light');
 });
 
-initTheme();
+// Theme init deferred to initDataStore()
 
 // ===== Terminal Management =====
 function generateTerminalId() {
@@ -2249,6 +2267,189 @@ async function handleFileTreeClick(item, container) {
   }
 }
 
+// ===== Breadcrumb Navigation =====
+function buildBreadcrumbs(filePath) {
+  if (!currentProject || !filePath) return '';
+  const projectPath = currentProject.path;
+  const relativePath = filePath.startsWith(projectPath)
+    ? filePath.substring(projectPath.length + 1)
+    : filePath;
+
+  const parts = relativePath.split('/');
+  const folderIcon = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>';
+  const fileIcon = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>';
+
+  let html = '<div class="preview-breadcrumbs">';
+
+  // Project root segment
+  let currentPath = projectPath;
+  html += `<span class="breadcrumb-segment" data-breadcrumb-path="${escapeHtml(projectPath)}">${folderIcon}<span>${escapeHtml(currentProject.name)}</span></span>`;
+
+  for (let i = 0; i < parts.length; i++) {
+    html += '<span class="breadcrumb-separator">&#8250;</span>';
+    currentPath += '/' + parts[i];
+    const isLast = i === parts.length - 1;
+    if (isLast) {
+      html += `<span class="breadcrumb-segment breadcrumb-file">${fileIcon}<span>${escapeHtml(parts[i])}</span></span>`;
+    } else {
+      html += `<span class="breadcrumb-segment" data-breadcrumb-path="${escapeHtml(currentPath)}">${folderIcon}<span>${escapeHtml(parts[i])}</span></span>`;
+    }
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function attachBreadcrumbListeners(container) {
+  container.querySelectorAll('.breadcrumb-segment[data-breadcrumb-path]').forEach(seg => {
+    seg.addEventListener('click', () => {
+      const targetPath = seg.dataset.breadcrumbPath;
+      // Switch to Files tab
+      const filesTab = document.querySelector('[data-tab="files"]');
+      if (filesTab) filesTab.click();
+      // Expand to the folder
+      expandToFolder(targetPath);
+    });
+  });
+}
+
+async function expandToFolder(targetPath) {
+  if (!currentProject) return;
+  const projectPath = currentProject.path;
+  const fileTree = document.getElementById('file-tree');
+
+  // Build the chain of folders from project root to target
+  const relativePath = targetPath.startsWith(projectPath)
+    ? targetPath.substring(projectPath.length + 1)
+    : targetPath;
+  const parts = relativePath.split('/').filter(Boolean);
+
+  let currentPath = projectPath;
+  for (const part of parts) {
+    currentPath += '/' + part;
+    if (!expandedFolders.has(currentPath)) {
+      expandedFolders.add(currentPath);
+      if (!fileTreeData.has(currentPath)) {
+        const children = await loadFileTree(currentPath);
+        fileTreeData.set(currentPath, children);
+      }
+    }
+  }
+
+  rebuildVisibleItems();
+  updateFileTreeSentinel(fileTree);
+  renderVisibleItems(fileTree);
+
+  // Scroll to the target folder in the file tree
+  const targetIndex = visibleFileItems.findIndex(item => item.path === targetPath);
+  if (targetIndex >= 0) {
+    fileTree.scrollTop = targetIndex * FILE_ITEM_HEIGHT;
+    renderVisibleItems(fileTree);
+  }
+}
+
+// ===== File Preview Minimap =====
+function getMinimapColors() {
+  const isDark = getCurrentTheme() === 'dark';
+  return {
+    text: isDark ? '#A8A5A0' : '#6B6966',
+    keyword: isDark ? '#569CD6' : '#0033B3',
+    string: isDark ? '#CE9178' : '#067D17',
+    comment: isDark ? '#6A9955' : '#8C8C8C',
+    bg: isDark ? '#2E2E2E' : '#EFEEEB',
+  };
+}
+
+function initMinimap(container) {
+  const codeEl = container.querySelector('.file-preview-content');
+  const minimapEl = container.querySelector('.preview-minimap');
+  const canvas = container.querySelector('.minimap-canvas');
+  const indicator = container.querySelector('.minimap-viewport-indicator');
+
+  if (!codeEl || !minimapEl || !canvas || !indicator) return;
+
+  // Hide minimap if content fits in viewport
+  if (codeEl.scrollHeight <= codeEl.clientHeight + 10) {
+    minimapEl.style.display = 'none';
+    return;
+  }
+  minimapEl.style.display = 'block';
+
+  const colors = getMinimapColors();
+  const lines = (currentPreviewContent?.content || '').split('\n');
+  const lineHeight = 2;
+  const canvasWidth = 56;
+  const canvasHeight = Math.min(lines.length * lineHeight, minimapEl.clientHeight || 600);
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvasWidth * dpr;
+  canvas.height = canvasHeight * dpr;
+  canvas.style.width = canvasWidth + 'px';
+  canvas.style.height = canvasHeight + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+  // Draw lines as tiny rects
+  const scale = canvasHeight / (lines.length * lineHeight);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
+    const y = i * lineHeight * scale;
+    const indent = line.search(/\S/);
+    const x = Math.min(indent * 1.5, 20);
+    const width = Math.min((line.trim().length) * 0.5, canvasWidth - x - 2);
+
+    // Simple color heuristic
+    const trimmed = line.trim();
+    if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*') || trimmed.startsWith('*')) {
+      ctx.fillStyle = colors.comment;
+    } else if (/^(import|export|const|let|var|function|class|if|else|for|while|return|async|await)\b/.test(trimmed)) {
+      ctx.fillStyle = colors.keyword;
+    } else if (/['"`]/.test(trimmed)) {
+      ctx.fillStyle = colors.string;
+    } else {
+      ctx.fillStyle = colors.text;
+    }
+
+    ctx.globalAlpha = 0.6;
+    ctx.fillRect(x + 2, y, Math.max(width, 3), Math.max(lineHeight * scale - 0.5, 1));
+  }
+  ctx.globalAlpha = 1;
+
+  // Viewport indicator
+  function updateIndicator() {
+    const scrollRatio = codeEl.scrollTop / (codeEl.scrollHeight - codeEl.clientHeight);
+    const viewportRatio = codeEl.clientHeight / codeEl.scrollHeight;
+    const indicatorHeight = Math.max(viewportRatio * canvasHeight, 12);
+    const maxTop = canvasHeight - indicatorHeight;
+    indicator.style.height = indicatorHeight + 'px';
+    indicator.style.top = (scrollRatio * maxTop) + 'px';
+  }
+  updateIndicator();
+  codeEl.addEventListener('scroll', updateIndicator);
+
+  // Click/drag on minimap to scroll
+  let isDragging = false;
+  function scrollToY(clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const y = clientY - rect.top;
+    const ratio = y / canvasHeight;
+    codeEl.scrollTop = ratio * (codeEl.scrollHeight - codeEl.clientHeight);
+  }
+
+  minimapEl.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    scrollToY(e.clientY);
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (isDragging) scrollToY(e.clientY);
+  });
+  document.addEventListener('mouseup', () => { isDragging = false; });
+}
+
 function canShowLivePreview(extension) {
   return ['.md', '.markdown', '.html', '.htm'].includes(extension.toLowerCase());
 }
@@ -2312,6 +2513,8 @@ function renderPreview() {
 
   const { name, extension, isImage, dataUrl, content } = currentPreviewContent;
 
+  const breadcrumbHtml = buildBreadcrumbs(currentPreviewFile);
+
   // Handle image files
   if (isImage) {
     previewTab.innerHTML = `
@@ -2319,11 +2522,13 @@ function renderPreview() {
         <div class="preview-header">
           <span class="preview-filename">${name}</span>
         </div>
+        ${breadcrumbHtml}
         <div class="preview-image-container">
           <img class="preview-image" src="${dataUrl}" alt="${name}">
         </div>
       </div>
     `;
+    attachBreadcrumbListeners(previewTab);
     return;
   }
 
@@ -2345,6 +2550,7 @@ function renderPreview() {
           ` : ''}
         </div>
       </div>
+      ${breadcrumbHtml}
   `;
 
   if (currentPreviewMode === 'live' && showLive) {
@@ -2362,13 +2568,19 @@ function renderPreview() {
       `;
     }
   } else {
-    // Raw mode with syntax highlighting
+    // Raw mode with syntax highlighting + minimap
     const highlighted = highlightCode(content, extension);
-    html += `<pre class="file-preview-content"><code class="hljs">${highlighted}</code></pre>`;
+    html += `<div class="preview-code-container">
+      <pre class="file-preview-content"><code class="hljs">${highlighted}</code></pre>
+      <div class="preview-minimap"><canvas class="minimap-canvas"></canvas><div class="minimap-viewport-indicator"></div></div>
+    </div>`;
   }
 
   html += '</div>';
   previewTab.innerHTML = html;
+
+  // Breadcrumb listeners
+  attachBreadcrumbListeners(previewTab);
 
   // Add mode toggle listeners
   previewTab.querySelectorAll('.preview-mode-btn[data-mode]').forEach(btn => {
@@ -2387,6 +2599,11 @@ function renderPreview() {
         renderBlameView(previewTab, blameData, name, extension);
       }
     });
+  }
+
+  // Initialize minimap for raw mode
+  if (currentPreviewMode === 'raw' || !showLive) {
+    requestAnimationFrame(() => initMinimap(previewTab));
   }
 
   // Set iframe content for HTML files
@@ -2499,13 +2716,11 @@ function getProjectNotesKey(projectPath) {
 
 function loadNotesForProject(projectPath) {
   if (!projectPath) {
-    // Load global notes when no project selected
-    const globalNotes = localStorage.getItem(GLOBAL_NOTES_KEY) || '';
+    const globalNotes = cachedNotes['__global__'] || '';
     notesEditor.value = globalNotes;
     notesEditor.placeholder = 'Write notes, draft prompts, or save code snippets...';
   } else {
-    const key = getProjectNotesKey(projectPath);
-    const notes = localStorage.getItem(key) || '';
+    const notes = cachedNotes[projectPath] || '';
     notesEditor.value = notes;
     notesEditor.placeholder = `Notes for ${projectPath.split('/').pop()}...`;
   }
@@ -2513,18 +2728,18 @@ function loadNotesForProject(projectPath) {
 
 function saveNotesForProject(projectPath) {
   if (!projectPath) {
-    localStorage.setItem(GLOBAL_NOTES_KEY, notesEditor.value);
+    cachedNotes['__global__'] = notesEditor.value;
   } else {
-    localStorage.setItem(getProjectNotesKey(projectPath), notesEditor.value);
+    cachedNotes[projectPath] = notesEditor.value;
   }
+  window.electronAPI.storeWrite('notes.json', cachedNotes);
 }
 
 notesEditor.addEventListener('input', () => {
   saveNotesForProject(currentProject?.path);
 });
 
-// Load global notes initially
-loadNotesForProject(null);
+// Notes load deferred to initDataStore()
 
 // ===== Projects =====
 const projectList = document.getElementById('project-list');
@@ -2532,11 +2747,12 @@ const addProjectBtn = document.getElementById('add-project-btn');
 const PROJECTS_KEY = 'programming-interface-projects';
 
 function getProjects() {
-  return JSON.parse(localStorage.getItem(PROJECTS_KEY) || '[]');
+  return cachedProjects;
 }
 
 function saveProjects(projects) {
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  cachedProjects = projects;
+  window.electronAPI.storeWrite('projects.json', { list: projects, settings: cachedProjectSettings });
 }
 
 function selectProject(project) {
@@ -2559,15 +2775,26 @@ function selectProject(project) {
 
   currentProject = project;
 
+  // Auto-add to workspace if not present
+  if (!workspaceProjects.some(p => p.path === project.path)) {
+    workspaceProjects.push(project);
+  }
+
   document.querySelectorAll('.project-item').forEach(item => {
     item.classList.toggle('active', item.dataset.path === project.path);
   });
 
   initTerminalForProject(project.path, project.path);
-  renderFileTree(project.path);
+  // Use workspace file tree if multiple projects, else standard
+  if (workspaceProjects.length > 1) {
+    renderWorkspaceFileTree();
+  } else {
+    renderFileTree(project.path);
+  }
   loadGitStatus(project.path);
   loadNotesForProject(project.path);
   expandedFolders.clear();
+  renderProjects(getProjects());
 }
 
 function renderProjects(projects) {
@@ -2581,12 +2808,15 @@ function renderProjects(projects) {
     return;
   }
 
-  projectList.innerHTML = projects.map((project, index) => `
+  projectList.innerHTML = projects.map((project, index) => {
+    const inWorkspace = workspaceProjects.some(wp => wp.path === project.path);
+    return `
     <div class="project-item" data-index="${index}" data-path="${project.path}">
       <svg class="project-icon" viewBox="0 0 24 24" fill="none">
         <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/>
       </svg>
       <span class="project-name">${project.name}</span>
+      ${inWorkspace ? '<span class="workspace-badge">W</span>' : ''}
       <button class="project-settings-btn" data-path="${project.path}" title="Settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
@@ -2595,13 +2825,20 @@ function renderProjects(projects) {
         </svg>
       </button>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   document.querySelectorAll('.project-item').forEach((item, index) => {
     item.addEventListener('click', (e) => {
       if (e.target.closest('.project-settings-btn')) return;
       const project = getProjects().find(p => p.path === item.dataset.path);
       if (project) selectProject(project);
+    });
+    // Right-click context menu for workspace
+    item.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const project = getProjects().find(p => p.path === item.dataset.path);
+      if (project) showWorkspaceContextMenu(e, project);
     });
     // Add drag and drop
     makeDraggable(item, index);
@@ -2614,6 +2851,180 @@ function renderProjects(projects) {
       openProjectSettings(btn.dataset.path);
     });
   });
+}
+
+// ===== Multi-Folder Workspaces =====
+function showWorkspaceContextMenu(e, project) {
+  // Remove any existing context menu
+  document.querySelector('.workspace-context-menu')?.remove();
+
+  const inWorkspace = workspaceProjects.some(wp => wp.path === project.path);
+  const menu = document.createElement('div');
+  menu.className = 'workspace-context-menu';
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+
+  if (inWorkspace) {
+    menu.innerHTML = `<button class="workspace-context-menu-item" data-action="remove">Remove from Workspace</button>`;
+  } else {
+    menu.innerHTML = `<button class="workspace-context-menu-item" data-action="add">Add to Workspace</button>`;
+  }
+
+  document.body.appendChild(menu);
+
+  menu.querySelector('[data-action]').addEventListener('click', () => {
+    const action = menu.querySelector('[data-action]').dataset.action;
+    if (action === 'add') addToWorkspace(project);
+    else if (action === 'remove') removeFromWorkspace(project);
+    menu.remove();
+  });
+
+  // Close on click outside
+  const closeMenu = (ev) => {
+    if (!menu.contains(ev.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 0);
+}
+
+function addToWorkspace(project) {
+  if (workspaceProjects.some(wp => wp.path === project.path)) return;
+  workspaceProjects.push(project);
+  renderProjects(getProjects());
+  if (workspaceProjects.length > 1) {
+    renderWorkspaceFileTree();
+  }
+}
+
+function removeFromWorkspace(project) {
+  workspaceProjects = workspaceProjects.filter(wp => wp.path !== project.path);
+  renderProjects(getProjects());
+  if (workspaceProjects.length <= 1 && currentProject) {
+    renderFileTree(currentProject.path);
+  } else if (workspaceProjects.length > 1) {
+    renderWorkspaceFileTree();
+  }
+}
+
+async function renderWorkspaceFileTree() {
+  const fileTree = document.getElementById('file-tree');
+
+  if (workspaceProjects.length <= 1 && currentProject) {
+    return renderFileTree(currentProject.path);
+  }
+
+  fileTree.innerHTML = '';
+  fileTree.classList.remove('file-tree-virtual');
+
+  for (const project of workspaceProjects) {
+    const isFocused = currentProject && currentProject.path === project.path;
+
+    // Get or initialize per-project expanded state
+    if (!workspaceExpandedFolders.has(project.path)) {
+      workspaceExpandedFolders.set(project.path, new Set());
+    }
+    if (!workspaceFileTreeData.has(project.path)) {
+      workspaceFileTreeData.set(project.path, new Map());
+    }
+
+    const rootHeader = document.createElement('div');
+    rootHeader.className = `workspace-root-header${isFocused ? ' focused' : ''}`;
+
+    // Load root items if not cached
+    const projectTreeData = workspaceFileTreeData.get(project.path);
+    if (!projectTreeData.has('__root__')) {
+      const items = await loadFileTree(project.path);
+      projectTreeData.set('__root__', items);
+    }
+
+    const expandedSet = workspaceExpandedFolders.get(project.path);
+    const isExpanded = expandedSet.has(project.path);
+
+    rootHeader.innerHTML = `
+      <svg class="folder-chevron${isExpanded ? ' expanded' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>
+      <span>${escapeHtml(project.name)}</span>
+    `;
+
+    rootHeader.addEventListener('click', () => {
+      if (expandedSet.has(project.path)) {
+        expandedSet.delete(project.path);
+      } else {
+        expandedSet.add(project.path);
+      }
+      renderWorkspaceFileTree();
+    });
+
+    fileTree.appendChild(rootHeader);
+
+    if (isExpanded) {
+      const childrenContainer = document.createElement('div');
+      childrenContainer.className = 'workspace-children';
+      const rootItems = projectTreeData.get('__root__') || [];
+      renderSimpleFileTree(childrenContainer, rootItems, 1, project.path, project);
+      fileTree.appendChild(childrenContainer);
+    }
+  }
+}
+
+function renderSimpleFileTree(container, items, depth, projectPath, project) {
+  const expandedSet = workspaceExpandedFolders.get(projectPath);
+  const projectTreeData = workspaceFileTreeData.get(projectPath);
+
+  for (const item of items) {
+    const div = document.createElement('div');
+    div.className = `file-item ${item.isDirectory ? 'folder' : 'file'}`;
+    div.style.height = `${FILE_ITEM_HEIGHT}px`;
+    div.style.paddingLeft = `${12 + depth * 16}px`;
+
+    const isExpanded = item.isDirectory && expandedSet.has(item.path);
+    const icon = item.isDirectory
+      ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>'
+      : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>';
+    const chevron = item.isDirectory
+      ? `<svg class="folder-chevron${isExpanded ? ' expanded' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      : '';
+
+    div.innerHTML = `${chevron}${icon}<span>${item.name}</span>`;
+
+    div.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (item.isDirectory) {
+        if (expandedSet.has(item.path)) {
+          expandedSet.delete(item.path);
+        } else {
+          expandedSet.add(item.path);
+          if (!projectTreeData.has(item.path)) {
+            const children = await loadFileTree(item.path);
+            projectTreeData.set(item.path, children);
+          }
+        }
+        renderWorkspaceFileTree();
+      } else {
+        // Switch to owning project and preview file
+        if (!currentProject || currentProject.path !== project.path) {
+          currentProject = project;
+          document.querySelectorAll('.project-item').forEach(pi => {
+            pi.classList.toggle('active', pi.dataset.path === project.path);
+          });
+          initTerminalForProject(project.path, project.path);
+          loadGitStatus(project.path);
+          loadNotesForProject(project.path);
+        }
+        await previewFile(item.path);
+      }
+    });
+
+    container.appendChild(div);
+
+    // Render children if expanded
+    if (item.isDirectory && isExpanded) {
+      const children = projectTreeData.get(item.path) || [];
+      renderSimpleFileTree(container, children, depth + 1, projectPath, project);
+    }
+  }
 }
 
 // ===== Add Project Dropdown =====
@@ -2724,7 +3135,7 @@ newFolderNameInput.addEventListener('keydown', (e) => {
   }
 });
 
-renderProjects(getProjects());
+// renderProjects deferred to initDataStore()
 
 // ===== Terminal Search =====
 const terminalSearchEl = document.getElementById('terminal-search');
@@ -3185,20 +3596,17 @@ let cachedDefaultSkipDirs = null;
 const PROJECT_SETTINGS_KEY = 'programming-interface-project-settings';
 
 function getProjectSettings(projectPath) {
-  const allSettings = JSON.parse(localStorage.getItem(PROJECT_SETTINGS_KEY) || '{}');
-  return allSettings[projectPath] || {};
+  return cachedProjectSettings[projectPath] || {};
 }
 
 function saveProjectSettings(projectPath, settings) {
-  const allSettings = JSON.parse(localStorage.getItem(PROJECT_SETTINGS_KEY) || '{}');
-  allSettings[projectPath] = settings;
-  localStorage.setItem(PROJECT_SETTINGS_KEY, JSON.stringify(allSettings));
+  cachedProjectSettings[projectPath] = settings;
+  window.electronAPI.storeWrite('projects.json', { list: cachedProjects, settings: cachedProjectSettings });
 }
 
 function deleteProjectSettings(projectPath) {
-  const allSettings = JSON.parse(localStorage.getItem(PROJECT_SETTINGS_KEY) || '{}');
-  delete allSettings[projectPath];
-  localStorage.setItem(PROJECT_SETTINGS_KEY, JSON.stringify(allSettings));
+  delete cachedProjectSettings[projectPath];
+  window.electronAPI.storeWrite('projects.json', { list: cachedProjects, settings: cachedProjectSettings });
 }
 
 async function getSkipDirsForProject(projectPath) {
@@ -3282,7 +3690,8 @@ document.getElementById('settings-remove').addEventListener('click', () => {
 
     // Clean up settings and notes
     deleteProjectSettings(editingProjectPath);
-    localStorage.removeItem(getProjectNotesKey(editingProjectPath));
+    delete cachedNotes[editingProjectPath];
+    window.electronAPI.storeWrite('notes.json', cachedNotes);
 
     // Clear current project if it was removed
     if (currentProject?.path === editingProjectPath) {
@@ -3317,24 +3726,59 @@ document.getElementById('settings-remove').addEventListener('click', () => {
   }
 });
 
+// ===== Export/Import Settings =====
+document.getElementById('settings-export').addEventListener('click', async () => {
+  const result = await window.electronAPI.storeExport();
+  if (result.success) {
+    alert('Settings exported successfully.');
+  }
+});
+
+document.getElementById('settings-import').addEventListener('click', async () => {
+  const result = await window.electronAPI.storeImport();
+  if (result.success) {
+    // Reload caches from disk and re-render
+    const [projectsData, sessionsData, notesData, profilesData, prefsData] = await Promise.all([
+      window.electronAPI.storeRead('projects.json'),
+      window.electronAPI.storeRead('sessions.json'),
+      window.electronAPI.storeRead('notes.json'),
+      window.electronAPI.storeRead('profiles.json'),
+      window.electronAPI.storeRead('preferences.json'),
+    ]);
+    if (projectsData) { cachedProjects = projectsData.list || []; cachedProjectSettings = projectsData.settings || {}; }
+    if (sessionsData) cachedSessions = sessionsData;
+    if (notesData) cachedNotes = notesData;
+    if (profilesData) cachedProfiles = profilesData;
+    if (prefsData) cachedPreferences = prefsData;
+    initTheme();
+    renderProjects(getProjects());
+    loadNotesForProject(currentProject?.path || null);
+    alert('Settings imported successfully.');
+  } else if (result.error) {
+    alert('Import failed: ' + result.error);
+  }
+});
+
 // ===== Terminal Profiles =====
 const TERMINAL_PROFILES_KEY = 'programming-interface-terminal-profiles';
 const ACTIVE_PROFILE_KEY = 'programming-interface-active-profile';
 
 function getTerminalProfiles() {
-  return JSON.parse(localStorage.getItem(TERMINAL_PROFILES_KEY) || '[]');
+  return cachedProfiles.profiles || [];
 }
 
 function saveTerminalProfiles(profiles) {
-  localStorage.setItem(TERMINAL_PROFILES_KEY, JSON.stringify(profiles));
+  cachedProfiles.profiles = profiles;
+  window.electronAPI.storeWrite('profiles.json', cachedProfiles);
 }
 
 function getActiveProfileName() {
-  return localStorage.getItem(ACTIVE_PROFILE_KEY) || 'Default';
+  return cachedProfiles.active || 'Default';
 }
 
 function setActiveProfileName(name) {
-  localStorage.setItem(ACTIVE_PROFILE_KEY, name);
+  cachedProfiles.active = name;
+  window.electronAPI.storeWrite('profiles.json', cachedProfiles);
 }
 
 function getActiveProfile() {
@@ -3553,40 +3997,70 @@ document.getElementById('broadcast-btn').addEventListener('click', () => {
 // ===== Session Restore =====
 const SESSION_KEY = 'programming-interface-session';
 
+function getTerminalBuffer(term) {
+  const buf = term.buffer.active;
+  const lines = [];
+  for (let y = 0; y < buf.length; y++) {
+    const line = buf.getLine(y);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  // Cap at 5000 lines to avoid bloat
+  if (lines.length > 5000) lines.splice(0, lines.length - 5000);
+  return lines.join('\n');
+}
+
 function saveSession() {
   if (!currentProject) return;
 
   const session = {
     activeProject: currentProject.path,
-    openTerminals: {}
+    openTerminals: {},
+    workspaceProjects: workspaceProjects.map(p => ({ path: p.path, name: p.name }))
   };
 
-  // Save terminal tab info for each project
+  // Save terminal tab info for each project (including buffer content)
   for (const [projectPath, data] of projectData) {
     session.openTerminals[projectPath] = {
       tabCount: data.tabs.length,
       activeTabIndex: data.activeTabIndex,
-      tabNames: data.tabs.map(t => t.name)
+      tabs: data.tabs.map(t => ({
+        name: t.name,
+        bufferContent: getTerminalBuffer(t.terminal)
+      }))
     };
   }
 
-  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  cachedSessions = session;
+  window.electronAPI.storeWrite('sessions.json', session);
 }
 
 async function restoreSession() {
-  const sessionData = localStorage.getItem(SESSION_KEY);
-  if (!sessionData) return;
+  const session = cachedSessions;
+  if (!session || !session.activeProject) return;
 
   try {
-    const session = JSON.parse(sessionData);
     const projects = getProjects();
 
+    // Restore workspace
+    if (session.workspaceProjects && Array.isArray(session.workspaceProjects)) {
+      workspaceProjects = session.workspaceProjects.filter(wp =>
+        projects.some(p => p.path === wp.path)
+      );
+    }
+
     // Find and select the active project
-    if (session.activeProject) {
-      const project = projects.find(p => p.path === session.activeProject);
-      if (project) {
-        // Restore the project
-        selectProject(project);
+    const project = projects.find(p => p.path === session.activeProject);
+    if (project) {
+      selectProject(project);
+
+      // Restore buffer content into first tab if available
+      const termData = session.openTerminals && session.openTerminals[project.path];
+      if (termData && termData.tabs && termData.tabs.length > 0) {
+        const pData = projectData.get(project.path);
+        if (pData && pData.tabs.length > 0 && termData.tabs[0].bufferContent) {
+          pData.tabs[0].terminal.write(termData.tabs[0].bufferContent);
+        }
       }
     }
   } catch (e) {
@@ -3603,8 +4077,98 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-// Restore session on load
-setTimeout(restoreSession, 100);
+// ===== DataStore Initialization =====
+async function initDataStore() {
+  // Load all store files
+  const [projectsData, sessionsData, notesData, profilesData, prefsData] = await Promise.all([
+    window.electronAPI.storeRead('projects.json'),
+    window.electronAPI.storeRead('sessions.json'),
+    window.electronAPI.storeRead('notes.json'),
+    window.electronAPI.storeRead('profiles.json'),
+    window.electronAPI.storeRead('preferences.json'),
+  ]);
+
+  // Check if store files exist; if not, migrate from localStorage
+  const hasStoreData = projectsData || sessionsData || notesData || profilesData || prefsData;
+
+  if (!hasStoreData) {
+    // One-time migration from localStorage
+    migrateFromLocalStorage();
+  } else {
+    // Populate caches from disk
+    if (projectsData) {
+      cachedProjects = projectsData.list || [];
+      cachedProjectSettings = projectsData.settings || {};
+    }
+    if (sessionsData) cachedSessions = sessionsData;
+    if (notesData) cachedNotes = notesData;
+    if (profilesData) cachedProfiles = profilesData;
+    if (prefsData) cachedPreferences = prefsData;
+  }
+
+  // Apply theme and render
+  initTheme();
+  renderProjects(getProjects());
+  loadNotesForProject(null);
+  restoreSession();
+}
+
+function migrateFromLocalStorage() {
+  // Projects
+  try {
+    const projects = JSON.parse(localStorage.getItem('programming-interface-projects') || '[]');
+    const allSettings = JSON.parse(localStorage.getItem('programming-interface-project-settings') || '{}');
+    cachedProjects = projects;
+    cachedProjectSettings = allSettings;
+    window.electronAPI.storeWrite('projects.json', { list: projects, settings: allSettings });
+  } catch { /* ignore */ }
+
+  // Sessions
+  try {
+    const sessionRaw = localStorage.getItem('programming-interface-session');
+    if (sessionRaw) {
+      cachedSessions = JSON.parse(sessionRaw);
+      window.electronAPI.storeWrite('sessions.json', cachedSessions);
+    }
+  } catch { /* ignore */ }
+
+  // Notes
+  try {
+    const notes = {};
+    const globalNotes = localStorage.getItem('programming-interface-global-notes');
+    if (globalNotes) notes['__global__'] = globalNotes;
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('programming-interface-notes-')) {
+        const projectPath = key.replace('programming-interface-notes-', '');
+        notes[projectPath] = localStorage.getItem(key);
+      }
+    }
+    cachedNotes = notes;
+    window.electronAPI.storeWrite('notes.json', notes);
+  } catch { /* ignore */ }
+
+  // Profiles
+  try {
+    const profiles = JSON.parse(localStorage.getItem('programming-interface-terminal-profiles') || '[]');
+    const active = localStorage.getItem('programming-interface-active-profile') || 'Default';
+    cachedProfiles = { profiles, active };
+    window.electronAPI.storeWrite('profiles.json', cachedProfiles);
+  } catch { /* ignore */ }
+
+  // Preferences
+  try {
+    const theme = localStorage.getItem('programming-interface-theme') || 'light';
+    const shortcuts = JSON.parse(localStorage.getItem('programming-interface-custom-shortcuts') || '{}');
+    cachedPreferences = { theme, customShortcuts: shortcuts };
+    window.electronAPI.storeWrite('preferences.json', cachedPreferences);
+  } catch { /* ignore */ }
+
+  console.log('Migrated data from localStorage to DataStore');
+}
+
+// Start async initialization (replaces synchronous init calls below)
+initDataStore();
 
 // ===== Auto Updater UI =====
 let updateAvailable = null;
@@ -3753,7 +4317,8 @@ document.getElementById('shortcut-editor-overlay').addEventListener('click', (e)
 });
 
 document.getElementById('shortcut-reset-all').addEventListener('click', () => {
-  localStorage.removeItem(CUSTOM_SHORTCUTS_KEY);
+  cachedPreferences.customShortcuts = {};
+  window.electronAPI.storeWrite('preferences.json', cachedPreferences);
   capturingShortcutId = null;
   renderShortcutList();
 });
@@ -3893,5 +4458,134 @@ function scrollActiveTabIntoView() {
 document.getElementById('tab-scroll-left').addEventListener('click', () => scrollTabsBy(-120));
 document.getElementById('tab-scroll-right').addEventListener('click', () => scrollTabsBy(120));
 document.getElementById('terminal-tabs').addEventListener('scroll', updateTabScrollButtons);
+
+// ===== Detachable Panels =====
+const detachedPanels = new Set();
+
+function getActiveContextTab() {
+  const activeTab = document.querySelector('.context-tabs .tab.active');
+  return activeTab ? activeTab.dataset.tab : 'preview';
+}
+
+// Pop-out button handler
+document.getElementById('popout-btn').addEventListener('click', async () => {
+  const panelType = getActiveContextTab();
+  if (detachedPanels.has(panelType)) return;
+
+  await window.electronAPI.openPanelWindow(panelType);
+  detachedPanels.add(panelType);
+
+  // Mark tab as detached
+  const tab = document.querySelector(`.context-tabs .tab[data-tab="${panelType}"]`);
+  if (tab) tab.classList.add('detached');
+
+  // Send initial state
+  sendPanelState(panelType);
+});
+
+function sendPanelState(panelType) {
+  const theme = getCurrentTheme();
+
+  if (panelType === 'preview') {
+    const previewTab = document.getElementById('preview-tab');
+    window.electronAPI.sendPanelUpdate(panelType, {
+      theme,
+      html: previewTab.innerHTML
+    });
+  } else if (panelType === 'files') {
+    const fileTree = document.getElementById('file-tree');
+    window.electronAPI.sendPanelUpdate(panelType, {
+      theme,
+      html: fileTree.innerHTML
+    });
+  } else if (panelType === 'git') {
+    const gitPanel = document.getElementById('git-panel');
+    window.electronAPI.sendPanelUpdate(panelType, {
+      theme,
+      html: gitPanel.innerHTML
+    });
+  } else if (panelType === 'notes') {
+    const notesEditor = document.getElementById('notes-editor');
+    window.electronAPI.sendPanelUpdate(panelType, {
+      theme,
+      notesContent: notesEditor.value
+    });
+  }
+}
+
+function notifyDetachedPanels() {
+  for (const panelType of detachedPanels) {
+    sendPanelState(panelType);
+  }
+}
+
+// Handle panel window closed
+window.electronAPI.onPanelWindowClosed((panelType) => {
+  detachedPanels.delete(panelType);
+  const tab = document.querySelector(`.context-tabs .tab[data-tab="${panelType}"]`);
+  if (tab) tab.classList.remove('detached');
+});
+
+// Handle actions from panel windows
+window.electronAPI.onPanelAction(({ panelType, action, payload }) => {
+  if (panelType === 'files') {
+    if (action === 'open-file' && payload.path) {
+      previewFile(payload.path);
+    } else if (action === 'toggle-folder' && payload.path) {
+      // Toggle in main file tree and resend state
+      if (expandedFolders.has(payload.path)) {
+        expandedFolders.delete(payload.path);
+      } else {
+        expandedFolders.add(payload.path);
+        if (!fileTreeData.has(payload.path)) {
+          loadFileTree(payload.path).then(children => {
+            fileTreeData.set(payload.path, children);
+            rebuildVisibleItems();
+            const fileTree = document.getElementById('file-tree');
+            updateFileTreeSentinel(fileTree);
+            renderVisibleItems(fileTree);
+            sendPanelState('files');
+          });
+          return;
+        }
+      }
+      rebuildVisibleItems();
+      const fileTree = document.getElementById('file-tree');
+      updateFileTreeSentinel(fileTree);
+      renderVisibleItems(fileTree);
+      sendPanelState('files');
+    }
+  } else if (panelType === 'notes' && action === 'notes-update') {
+    const notesEditor = document.getElementById('notes-editor');
+    notesEditor.value = payload.content;
+    saveNotesForProject(currentProject?.path);
+  }
+});
+
+// Handle panel requesting initial state
+window.electronAPI.onPanelRequestState((panelType) => {
+  sendPanelState(panelType);
+});
+
+// Sync detached panels via MutationObservers on panel content
+const previewObserver = new MutationObserver(() => {
+  if (detachedPanels.has('preview')) sendPanelState('preview');
+});
+previewObserver.observe(document.getElementById('preview-tab'), { childList: true, subtree: true });
+
+const filesObserver = new MutationObserver(() => {
+  if (detachedPanels.has('files')) sendPanelState('files');
+});
+filesObserver.observe(document.getElementById('file-tree'), { childList: true, subtree: true });
+
+const gitObserver = new MutationObserver(() => {
+  if (detachedPanels.has('git')) sendPanelState('git');
+});
+gitObserver.observe(document.getElementById('git-panel'), { childList: true, subtree: true });
+
+// Notes sync on input
+document.getElementById('notes-editor').addEventListener('input', () => {
+  if (detachedPanels.has('notes')) sendPanelState('notes');
+});
 
 console.log('Programming Interface loaded');

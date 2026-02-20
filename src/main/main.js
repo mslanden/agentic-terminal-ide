@@ -6,6 +6,7 @@ const os = require('os');
 const { autoUpdater } = require('electron-updater');
 
 let mainWindow;
+const panelWindows = new Map(); // panelType -> BrowserWindow
 
 // ===== Auto Updater =====
 autoUpdater.autoDownload = false;
@@ -52,6 +53,36 @@ function checkForUpdates() {
   }
 }
 const terminals = new Map(); // Map of terminalId -> ptyProcess
+
+// ===== DataStore (on-disk JSON persistence) =====
+class DataStore {
+  constructor(baseDir) {
+    this.baseDir = baseDir;
+    fs.mkdirSync(baseDir, { recursive: true });
+  }
+  read(filename) {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(this.baseDir, filename), 'utf-8'));
+    } catch {
+      return null;
+    }
+  }
+  write(filename, data) {
+    const filePath = path.join(this.baseDir, filename);
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, filePath);
+  }
+  listFiles() {
+    try {
+      return fs.readdirSync(this.baseDir).filter(f => f.endsWith('.json'));
+    } catch {
+      return [];
+    }
+  }
+}
+
+const dataStore = new DataStore(path.join(app.getPath('userData'), 'data'));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -809,4 +840,116 @@ ipcMain.handle('install-update', () => {
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
+});
+
+// ===== DataStore IPC =====
+ipcMain.handle('store-read', (_, filename) => {
+  return dataStore.read(filename);
+});
+
+ipcMain.handle('store-write', (_, filename, data) => {
+  dataStore.write(filename, data);
+});
+
+// ===== Detachable Panel Windows =====
+ipcMain.handle('open-panel-window', (event, panelType) => {
+  // If window already exists for this panel, focus it
+  if (panelWindows.has(panelType)) {
+    const existing = panelWindows.get(panelType);
+    if (!existing.isDestroyed()) {
+      existing.focus();
+      return true;
+    }
+    panelWindows.delete(panelType);
+  }
+
+  const panelWin = new BrowserWindow({
+    width: 400,
+    height: 600,
+    minWidth: 250,
+    minHeight: 300,
+    title: panelType.charAt(0).toUpperCase() + panelType.slice(1),
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 12, y: 12 },
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
+    }
+  });
+
+  panelWin.loadFile(path.join(__dirname, '../renderer/panel-window.html'), {
+    query: { panel: panelType }
+  });
+
+  panelWindows.set(panelType, panelWin);
+
+  panelWin.on('closed', () => {
+    panelWindows.delete(panelType);
+    // Notify main renderer that panel closed
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('panel-window-closed', panelType);
+    }
+  });
+
+  return true;
+});
+
+ipcMain.on('panel-update', (event, { panelType, data }) => {
+  const panelWin = panelWindows.get(panelType);
+  if (panelWin && !panelWin.isDestroyed()) {
+    panelWin.webContents.send('panel-state-update', { panelType, data });
+  }
+});
+
+ipcMain.on('panel-action', (event, { panelType, action, payload }) => {
+  // Forward action from panel window to main renderer
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('panel-action', { panelType, action, payload });
+  }
+});
+
+ipcMain.on('panel-request-state', (event, panelType) => {
+  // Forward to main renderer to send current state
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('panel-request-state', panelType);
+  }
+});
+
+ipcMain.handle('store-export', async () => {
+  const date = new Date().toISOString().split('T')[0];
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export All Settings',
+    defaultPath: `agentic-terminal-backup-${date}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return { success: false };
+  const bundle = { version: 1, exportedAt: new Date().toISOString(), data: {} };
+  for (const file of dataStore.listFiles()) {
+    bundle.data[file] = dataStore.read(file);
+  }
+  fs.writeFileSync(result.filePath, JSON.stringify(bundle, null, 2));
+  return { success: true, path: result.filePath };
+});
+
+ipcMain.handle('store-import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Settings',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  });
+  if (result.canceled || result.filePaths.length === 0) return { success: false };
+  try {
+    const raw = fs.readFileSync(result.filePaths[0], 'utf-8');
+    const bundle = JSON.parse(raw);
+    if (!bundle.version || !bundle.data) return { success: false, error: 'Invalid backup file' };
+    for (const [filename, content] of Object.entries(bundle.data)) {
+      if (filename.endsWith('.json') && content != null) {
+        dataStore.write(filename, content);
+      }
+    }
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });

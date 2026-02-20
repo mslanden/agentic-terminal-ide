@@ -106,4 +106,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onUpdateStatus: (callback) => {
     ipcRenderer.on('update-status', (event, data) => callback(data));
   },
+
+  // DataStore
+  storeRead: (filename) => ipcRenderer.invoke('store-read', filename),
+  storeWrite: (filename, data) => ipcRenderer.invoke('store-write', filename, data),
+  storeExport: () => ipcRenderer.invoke('store-export'),
+  storeImport: () => ipcRenderer.invoke('store-import'),
+
+  // Panel Windows (main renderer side)
+  openPanelWindow: (panelType) => ipcRenderer.invoke('open-panel-window', panelType),
+  sendPanelUpdate: (panelType, data) => ipcRenderer.send('panel-update', { panelType, data }),
+  onPanelWindowClosed: (callback) => ipcRenderer.on('panel-window-closed', (event, panelType) => callback(panelType)),
+  onPanelAction: (callback) => ipcRenderer.on('panel-action', (event, data) => callback(data)),
+  onPanelRequestState: (callback) => ipcRenderer.on('panel-request-state', (event, panelType) => callback(panelType)),
+
+  // Panel Windows (panel window side)
+  sendPanelAction: (panelType, action, payload) => ipcRenderer.send('panel-action', { panelType, action, payload }),
+  requestPanelState: (panelType) => ipcRenderer.send('panel-request-state', panelType),
+  onPanelStateUpdate: (callback) => ipcRenderer.on('panel-state-update', (event, data) => callback(data)),
 });

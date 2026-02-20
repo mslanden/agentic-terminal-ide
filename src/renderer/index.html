@@ -155,6 +155,11 @@
           <button class="tab" data-tab="files">Files</button>
           <button class="tab" data-tab="git">Git</button>
           <button class="tab" data-tab="notes">Notes</button>
+          <button class="popout-btn" id="popout-btn" title="Pop out active panel">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+              <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -275,6 +280,9 @@
       </div>
       <div class="settings-footer">
         <button class="settings-btn settings-btn-danger" id="settings-remove">Remove Project</button>
+        <button class="settings-btn settings-btn-export" id="settings-export">Export All Settings</button>
+        <button class="settings-btn settings-btn-import" id="settings-import">Import Settings</button>
+        <span style="flex:1"></span>
         <button class="settings-btn settings-btn-secondary" id="settings-cancel">Cancel</button>
         <button class="settings-btn settings-btn-primary" id="settings-save">Save</button>
       </div>

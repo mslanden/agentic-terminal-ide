@@ -1375,6 +1375,17 @@ body {
   background: rgba(244, 71, 71, 0.2);
 }
 
+.settings-btn-export,
+.settings-btn-import {
+  color: var(--accent);
+  background: rgba(139, 115, 85, 0.1);
+}
+
+.settings-btn-export:hover,
+.settings-btn-import:hover {
+  background: rgba(139, 115, 85, 0.2);
+}
+
 /* ===== Git Branch Selector ===== */
 .git-branch-selector {
   position: relative;
@@ -3013,4 +3024,235 @@ td.diff-ln.empty {
 @keyframes pulse-capture {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
+}
+
+/* ===== Breadcrumb Navigation ===== */
+.preview-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-light);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+
+.preview-breadcrumbs::-webkit-scrollbar {
+  display: none;
+}
+
+.breadcrumb-segment {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.breadcrumb-segment:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.breadcrumb-segment svg {
+  flex-shrink: 0;
+}
+
+.breadcrumb-separator {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.breadcrumb-file {
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: default;
+}
+
+.breadcrumb-file:hover {
+  background: transparent;
+}
+
+/* ===== File Preview Minimap ===== */
+.preview-code-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.preview-code-container .file-preview-content {
+  flex: 1;
+  overflow: auto;
+}
+
+.preview-minimap {
+  width: 60px;
+  flex-shrink: 0;
+  background: var(--bg-tertiary);
+  border-left: 1px solid var(--border-light);
+  position: relative;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.preview-minimap canvas {
+  display: block;
+  width: 100%;
+}
+
+.minimap-viewport-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: var(--accent);
+  opacity: 0.15;
+  pointer-events: none;
+  border-radius: 2px;
+  transition: top 0.05s linear;
+}
+
+/* ===== Multi-Folder Workspaces ===== */
+.workspace-root-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.workspace-root-header:hover {
+  background: var(--bg-hover);
+}
+
+.workspace-root-header.focused {
+  background: var(--bg-tertiary);
+}
+
+.workspace-root-header .folder-chevron {
+  flex-shrink: 0;
+}
+
+.workspace-badge {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+  background: rgba(139, 115, 85, 0.12);
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+[data-theme="dark"] .workspace-badge {
+  background: rgba(201, 168, 124, 0.12);
+}
+
+.workspace-context-menu {
+  position: fixed;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-medium);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  padding: 4px;
+  min-width: 160px;
+}
+
+.workspace-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.workspace-context-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+.workspace-children {
+  margin-left: 0;
+}
+
+/* ===== Detachable Panels (Pop-out) ===== */
+.popout-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  margin-left: 4px;
+}
+
+.popout-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tab.detached {
+  font-style: italic;
+  opacity: 0.4;
+  position: relative;
+}
+
+.tab.detached::after {
+  content: '\2197';
+  font-size: 8px;
+  margin-left: 2px;
+  font-style: normal;
+}
+
+/* Panel window styles */
+.panel-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-light);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.panel-window-header h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.panel-window-content {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg-primary);
 }

@@ -4,7 +4,7 @@
   "description": "Agentic Terminal IDE - A native terminal environment for AI-assisted development with Claude",
   "main": "src/main/main.js",
   "scripts": {
-    "build": "esbuild src/renderer/renderer.js --bundle --platform=browser --outfile=src/renderer/bundle.js --external:electron",
+    "build": "esbuild src/renderer/renderer.js --bundle --platform=browser --outfile=src/renderer/bundle.js --external:electron && esbuild src/renderer/panel-window.js --bundle --platform=browser --outfile=src/renderer/panel-window-bundle.js --external:electron",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --enable-logging",
     "generate-icons": "node scripts/generate-icons.js",
