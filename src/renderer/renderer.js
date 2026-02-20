@@ -1,6 +1,7 @@
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { SearchAddon } = require('@xterm/addon-search');
+const { WebLinksAddon } = require('@xterm/addon-web-links');
 const { marked } = require('marked');
 const hljs = require('highlight.js/lib/common');
 
@@ -25,6 +26,87 @@ let currentPreviewMode = 'raw'; // 'raw' or 'live'
 
 // Diff viewer state
 let currentDiffMode = 'unified'; // 'unified' or 'split'
+
+// Broadcast mode state
+let broadcastMode = false;
+
+// Shortcut editor state
+let capturingShortcutId = null;
+
+// ===== Custom Keyboard Shortcuts =====
+const CUSTOM_SHORTCUTS_KEY = 'programming-interface-custom-shortcuts';
+
+function getCustomShortcuts() {
+  return JSON.parse(localStorage.getItem(CUSTOM_SHORTCUTS_KEY) || '{}');
+}
+
+function saveCustomShortcuts(shortcuts) {
+  localStorage.setItem(CUSTOM_SHORTCUTS_KEY, JSON.stringify(shortcuts));
+}
+
+// ===== Shortcut Registry =====
+const SHORTCUT_REGISTRY = [
+  // Terminal
+  { id: 'new-terminal', label: 'New Terminal', category: 'Terminal', defaultBinding: { key: 't', metaKey: true, shiftKey: false, altKey: false }, action: () => { if (currentProject) createNewTab(currentProject.path, currentProject.path); } },
+  { id: 'close-terminal', label: 'Close Terminal', category: 'Terminal', defaultBinding: { key: 'w', metaKey: true, shiftKey: false, altKey: false }, action: () => { if (currentProject && projectData.has(currentProject.path)) { const d = projectData.get(currentProject.path); if (d.tabs.length > 1) closeTab(d.activeTabIndex); } } },
+  { id: 'terminal-search', label: 'Terminal Search', category: 'Terminal', defaultBinding: { key: 'f', metaKey: true, shiftKey: false, altKey: false }, action: () => openTerminalSearch() },
+  { id: 'split-horizontal', label: 'Split Horizontal', category: 'Terminal', defaultBinding: { key: '\\', metaKey: true, shiftKey: false, altKey: false }, action: () => splitTerminal('horizontal') },
+  { id: 'split-vertical', label: 'Split Vertical', category: 'Terminal', defaultBinding: { key: '\\', metaKey: true, shiftKey: true, altKey: false }, action: () => splitTerminal('vertical') },
+  { id: 'broadcast-toggle', label: 'Toggle Broadcast', category: 'Terminal', defaultBinding: { key: 'b', metaKey: true, shiftKey: true, altKey: false }, action: () => toggleBroadcastMode() },
+  // Navigation
+  { id: 'tab-preview', label: 'Preview Tab', category: 'Navigation', defaultBinding: { key: '1', metaKey: true, shiftKey: false, altKey: false }, action: () => { const t = document.querySelector('[data-tab="preview"]'); if (t) t.click(); } },
+  { id: 'tab-files', label: 'Files Tab', category: 'Navigation', defaultBinding: { key: '2', metaKey: true, shiftKey: false, altKey: false }, action: () => { const t = document.querySelector('[data-tab="files"]'); if (t) t.click(); } },
+  { id: 'tab-git', label: 'Git Tab', category: 'Navigation', defaultBinding: { key: '3', metaKey: true, shiftKey: false, altKey: false }, action: () => { const t = document.querySelector('[data-tab="git"]'); if (t) t.click(); } },
+  { id: 'tab-notes', label: 'Notes Tab', category: 'Navigation', defaultBinding: { key: '4', metaKey: true, shiftKey: false, altKey: false }, action: () => { const t = document.querySelector('[data-tab="notes"]'); if (t) t.click(); } },
+  // Search
+  { id: 'quick-open', label: 'Quick Open', category: 'Search', defaultBinding: { key: 'p', metaKey: true, shiftKey: false, altKey: false }, action: () => openQuickOpen() },
+  { id: 'global-search', label: 'Global Search', category: 'Search', defaultBinding: { key: 'f', metaKey: true, shiftKey: true, altKey: false }, action: () => openGlobalSearch() },
+  { id: 'command-palette', label: 'Command Palette', category: 'Search', defaultBinding: { key: 'p', metaKey: true, shiftKey: true, altKey: false }, action: () => openCommandPalette() },
+  // Tools
+  { id: 'theme-toggle', label: 'Toggle Theme', category: 'Tools', defaultBinding: null, action: () => { const cur = getCurrentTheme(); setTheme(cur === 'light' ? 'dark' : 'light'); } },
+  { id: 'keyboard-shortcuts', label: 'Keyboard Shortcuts', category: 'Tools', defaultBinding: null, action: () => openShortcutEditor() },
+  // Git (button-only, no default binding)
+  { id: 'git-refresh', label: 'Git Refresh', category: 'Git', defaultBinding: null, action: () => { const btn = document.querySelector('.git-refresh-btn'); if (btn) btn.click(); } },
+  { id: 'git-push', label: 'Git Push', category: 'Git', defaultBinding: null, action: () => { const btn = document.querySelector('.git-push-btn'); if (btn) btn.click(); } },
+  { id: 'git-pull', label: 'Git Pull', category: 'Git', defaultBinding: null, action: () => { const btn = document.querySelector('.git-pull-btn'); if (btn) btn.click(); } },
+  { id: 'git-stage-all', label: 'Git Stage All', category: 'Git', defaultBinding: null, action: () => { const btn = document.querySelector('.git-stage-all-btn'); if (btn) btn.click(); } },
+  // Project
+  { id: 'add-project', label: 'Add Project', category: 'Project', defaultBinding: null, action: () => { document.getElementById('add-project-btn').click(); } },
+  { id: 'project-settings', label: 'Project Settings', category: 'Project', defaultBinding: null, action: () => { if (currentProject) openProjectSettings(currentProject.path); } },
+  { id: 'select-profile', label: 'Select Profile', category: 'Terminal', defaultBinding: null, action: () => { document.getElementById('profile-btn').click(); } },
+];
+
+function getEffectiveBinding(id) {
+  const custom = getCustomShortcuts();
+  if (custom[id]) return custom[id];
+  const entry = SHORTCUT_REGISTRY.find(e => e.id === id);
+  return entry ? entry.defaultBinding : null;
+}
+
+function bindingMatchesEvent(binding, e) {
+  if (!binding) return false;
+  const key = binding.key.toLowerCase();
+  const eventKey = e.key.toLowerCase();
+  // Handle shift+\ producing | on US keyboards
+  if (key === '\\' && binding.shiftKey && (eventKey === '\\' || eventKey === '|')) {
+    return (e.metaKey || e.ctrlKey) === !!binding.metaKey && e.shiftKey === !!binding.shiftKey && e.altKey === !!binding.altKey;
+  }
+  if (eventKey !== key) return false;
+  return (e.metaKey || e.ctrlKey) === !!binding.metaKey && e.shiftKey === !!binding.shiftKey && e.altKey === !!binding.altKey;
+}
+
+function formatShortcut(binding) {
+  if (!binding) return '';
+  const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+  const parts = [];
+  if (binding.metaKey) parts.push(isMac ? '⌘' : 'Ctrl');
+  if (binding.shiftKey) parts.push(isMac ? '⇧' : 'Shift');
+  if (binding.altKey) parts.push(isMac ? '⌥' : 'Alt');
+  const keyMap = { '\\': '\\', arrowup: '↑', arrowdown: '↓', arrowleft: '←', arrowright: '→', enter: '↵', escape: 'Esc', backspace: '⌫', delete: 'Del', ' ': 'Space' };
+  const display = keyMap[binding.key.toLowerCase()] || binding.key.toUpperCase();
+  parts.push(display);
+  return parts.join(isMac ? '' : '+');
+}
 
 // ===== Theme Management =====
 const THEME_KEY = 'programming-interface-theme';
@@ -111,13 +193,13 @@ function generateTerminalId() {
   return `term-${Date.now()}-${++terminalCounter}`;
 }
 
-function createTerminalInstance() {
+function createTerminalInstance(options = {}) {
   const theme = getCurrentTheme() === 'dark' ? darkTerminalTheme : lightTerminalTheme;
 
   const terminal = new Terminal({
     theme,
-    fontFamily: '"SF Mono", "Fira Code", "JetBrains Mono", monospace',
-    fontSize: 13,
+    fontFamily: options.fontFamily || '"SF Mono", "Fira Code", "JetBrains Mono", monospace',
+    fontSize: options.fontSize ? parseInt(options.fontSize) : 13,
     lineHeight: 1.4,
     cursorBlink: true,
     cursorStyle: 'bar',
@@ -126,8 +208,12 @@ function createTerminalInstance() {
 
   const fitAddon = new FitAddon();
   const searchAddon = new SearchAddon();
+  const webLinksAddon = new WebLinksAddon((event, url) => {
+    window.electronAPI.openExternal(url);
+  });
   terminal.loadAddon(fitAddon);
   terminal.loadAddon(searchAddon);
+  terminal.loadAddon(webLinksAddon);
 
   return { terminal, fitAddon, searchAddon };
 }
@@ -180,18 +266,26 @@ function renderTerminalTabs() {
     // Determine if this tab is in split view and which pane
     let splitIndicator = '';
     let splitClass = '';
+    let broadcastClass = broadcastMode ? 'broadcast-active' : '';
+    let broadcastIndicator = broadcastMode ? '<span class="broadcast-indicator"></span>' : '';
     if (splitState.active && isTerminalInSplit(tab.id)) {
       splitClass = 'in-split';
+      const isVertical = splitState.direction === 'vertical';
       if (tab.id === splitState.leftId) {
-        splitIndicator = '<span class="split-indicator split-left" title="Left pane">◧</span>';
+        const label = isVertical ? 'Top pane' : 'Left pane';
+        const icon = isVertical ? '⬆' : '◧';
+        splitIndicator = `<span class="split-indicator split-left" title="${label}">${icon}</span>`;
       } else {
-        splitIndicator = '<span class="split-indicator split-right" title="Right pane">◨</span>';
+        const label = isVertical ? 'Bottom pane' : 'Right pane';
+        const icon = isVertical ? '⬇' : '◨';
+        splitIndicator = `<span class="split-indicator split-right" title="${label}">${icon}</span>`;
       }
     }
 
     return `
-      <div class="terminal-tab ${index === data.activeTabIndex ? 'active' : ''} ${splitClass}"
+      <div class="terminal-tab ${index === data.activeTabIndex ? 'active' : ''} ${splitClass} ${broadcastClass}"
            data-index="${index}" data-id="${tab.id}" draggable="true">
+        ${broadcastIndicator}
         ${splitIndicator}
         <span class="terminal-tab-name">${tab.name}</span>
         ${data.tabs.length > 1 ? `
@@ -262,6 +356,8 @@ function renderTerminalTabs() {
       closeTab(index);
     });
   });
+
+  updateTabScrollButtons();
 }
 
 function switchToTab(index) {
@@ -312,6 +408,7 @@ function switchToTab(index) {
   }, 50);
 
   renderTerminalTabs();
+  scrollActiveTabIntoView();
 }
 
 async function closeTab(index) {
@@ -395,13 +492,30 @@ async function createNewTab(projectPath, cwd, name = null) {
   container.id = `terminal-${id}`;
   terminalContent.appendChild(container);
 
+  // Resolve active profile for font options
+  const activeProfile = getActiveProfile();
+  const profileFontOpts = {};
+  if (activeProfile) {
+    if (activeProfile.fontSize) profileFontOpts.fontSize = activeProfile.fontSize;
+    if (activeProfile.fontFamily) profileFontOpts.fontFamily = activeProfile.fontFamily;
+  }
+
+  const fontOpts = { ...profileFontOpts };
+
   // Create terminal
-  const { terminal, fitAddon, searchAddon } = createTerminalInstance();
+  const { terminal, fitAddon, searchAddon } = createTerminalInstance(fontOpts);
   terminal.open(container);
 
-  // Handle input
+  // Handle input (with broadcast support)
   terminal.onData((inputData) => {
-    window.electronAPI.terminalInput(id, inputData);
+    if (broadcastMode && currentProject && projectData.has(currentProject.path)) {
+      const tabs = projectData.get(currentProject.path).tabs;
+      for (const tab of tabs) {
+        window.electronAPI.terminalInput(tab.id, inputData);
+      }
+    } else {
+      window.electronAPI.terminalInput(id, inputData);
+    }
   });
 
   // Copy/Paste support
@@ -419,11 +533,18 @@ async function createNewTab(projectPath, cwd, name = null) {
       return true;
     }
 
-    // Cmd/Ctrl+V: paste from clipboard
+    // Cmd/Ctrl+V: paste from clipboard (with broadcast support)
     if (isMeta && event.key === 'v') {
       navigator.clipboard.readText().then(text => {
         if (text) {
-          window.electronAPI.terminalInput(id, text);
+          if (broadcastMode && currentProject && projectData.has(currentProject.path)) {
+            const tabs = projectData.get(currentProject.path).tabs;
+            for (const tab of tabs) {
+              window.electronAPI.terminalInput(tab.id, text);
+            }
+          } else {
+            window.electronAPI.terminalInput(id, text);
+          }
         }
       });
       return false;
@@ -435,6 +556,10 @@ async function createNewTab(projectPath, cwd, name = null) {
   // Get project settings for shell, env, and startup command
   const settings = getProjectSettings(projectPath);
   const terminalOptions = {};
+
+  // Profile provides shell/env defaults, project settings override
+  if (activeProfile && activeProfile.shell) terminalOptions.shell = activeProfile.shell;
+  if (activeProfile && activeProfile.env) terminalOptions.env = activeProfile.env;
   if (settings.shell) terminalOptions.shell = settings.shell;
   if (settings.env) terminalOptions.env = settings.env;
   // Only run startup command on first terminal of a project
@@ -512,7 +637,8 @@ document.getElementById('new-terminal-btn').addEventListener('click', () => {
 let splitState = {
   active: false,
   leftId: null,
-  rightId: null
+  rightId: null,
+  direction: 'horizontal'
 };
 
 // Helper functions to work with terminal tabs by ID
@@ -529,7 +655,7 @@ function getTabIndex(terminalId) {
 }
 
 // Enter split mode with two specific terminals
-async function enterSplitMode(leftId, rightId) {
+async function enterSplitMode(leftId, rightId, direction = 'horizontal') {
   if (!currentProject || !projectData.has(currentProject.path)) return;
 
   const data = projectData.get(currentProject.path);
@@ -557,7 +683,8 @@ async function enterSplitMode(leftId, rightId) {
   splitState = {
     active: true,
     leftId: leftId,
-    rightId: rightId
+    rightId: rightId,
+    direction: direction
   };
 
   // Hide all containers first
@@ -578,7 +705,7 @@ async function enterSplitMode(leftId, rightId) {
 
   // Create split container
   const splitContainer = document.createElement('div');
-  splitContainer.className = 'terminal-split-container horizontal';
+  splitContainer.className = `terminal-split-container ${direction}`;
 
   // Create panes
   const pane1 = document.createElement('div');
@@ -586,7 +713,7 @@ async function enterSplitMode(leftId, rightId) {
   pane1.dataset.terminalId = leftId;
 
   const resizeHandle = document.createElement('div');
-  resizeHandle.className = 'split-resize-handle horizontal';
+  resizeHandle.className = `split-resize-handle ${direction}`;
 
   const pane2 = document.createElement('div');
   pane2.className = 'terminal-split-pane';
@@ -628,7 +755,7 @@ async function enterSplitMode(leftId, rightId) {
   }, 100);
 
   // Setup split resize
-  setupSplitResize(resizeHandle, pane1, pane2, 'horizontal');
+  setupSplitResize(resizeHandle, pane1, pane2, direction);
   renderTerminalTabs();
 }
 
@@ -654,7 +781,8 @@ function exitSplitMode(rerender = true) {
   splitState = {
     active: false,
     leftId: null,
-    rightId: null
+    rightId: null,
+    direction: 'horizontal'
   };
 
   // Show active tab
@@ -672,20 +800,28 @@ function exitSplitMode(rerender = true) {
   }
 }
 
-// Toggle split: if active, exit; if not, split with current tab
-async function splitTerminal() {
+// Toggle split: if active with same direction, exit; different direction, re-enter; not split, enter
+async function splitTerminal(direction = 'horizontal') {
   if (!currentProject || !projectData.has(currentProject.path)) return;
 
   const data = projectData.get(currentProject.path);
   if (data.tabs.length === 0) return;
 
   if (splitState.active) {
-    // If we're already in split mode, exit
-    exitSplitMode();
+    if (splitState.direction === direction) {
+      // Same direction: toggle off
+      exitSplitMode();
+    } else {
+      // Different direction: re-enter with swapped direction, keeping same terminals
+      const leftId = splitState.leftId;
+      const rightId = splitState.rightId;
+      exitSplitMode(false);
+      await enterSplitMode(leftId, rightId, direction);
+    }
   } else {
     // Enter split mode with current tab on left, new tab on right
     const currentTab = data.tabs[data.activeTabIndex];
-    await enterSplitMode(currentTab.id, null);
+    await enterSplitMode(currentTab.id, null, direction);
   }
 }
 
@@ -771,9 +907,12 @@ function isTerminalInSplit(terminalId) {
   return splitState.active && (splitState.leftId === terminalId || splitState.rightId === terminalId);
 }
 
-// Split terminal button
+// Split terminal buttons
 document.getElementById('split-terminal-btn').addEventListener('click', () => {
-  splitTerminal();
+  splitTerminal('horizontal');
+});
+document.getElementById('split-terminal-v-btn').addEventListener('click', () => {
+  splitTerminal('vertical');
 });
 
 function setupSplitResize(handle, pane1, pane2, direction) {
@@ -1949,13 +2088,47 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;');
 }
 
-// ===== File Tree =====
+// ===== File Tree (Virtualized) =====
+const FILE_ITEM_HEIGHT = 30;
+const VIRTUAL_OVERSCAN = 5;
 let expandedFolders = new Set();
+let fileTreeData = new Map(); // path -> children array
+let visibleFileItems = []; // flattened visible items
+let fileTreeScrollRAF = null;
 
 async function loadFileTree(dirPath) {
   const result = await window.electronAPI.readDirectory(dirPath);
   if (!result.success) return [];
   return result.items;
+}
+
+function buildVisibleItems(items, depth = 0) {
+  const result = [];
+  for (const item of items) {
+    result.push({
+      name: item.name,
+      path: item.path,
+      isDir: item.isDirectory,
+      depth,
+      hasChildren: item.isDirectory
+    });
+    if (item.isDirectory && expandedFolders.has(item.path)) {
+      const children = fileTreeData.get(item.path);
+      if (children) {
+        result.push(...buildVisibleItems(children, depth + 1));
+      }
+    }
+  }
+  return result;
+}
+
+function rebuildVisibleItems() {
+  const rootItems = fileTreeData.get('__root__');
+  if (!rootItems) {
+    visibleFileItems = [];
+    return;
+  }
+  visibleFileItems = buildVisibleItems(rootItems, 0);
 }
 
 async function renderFileTree(projectPath) {
@@ -1971,102 +2144,109 @@ async function renderFileTree(projectPath) {
         <span>Select a project to browse</span>
       </div>
     `;
+    fileTreeData.clear();
+    visibleFileItems = [];
     return;
   }
 
   fileTree.innerHTML = '<div class="loading">Loading...</div>';
   const items = await loadFileTree(projectPath);
-  fileTree.innerHTML = '';
+  fileTreeData.clear();
+  fileTreeData.set('__root__', items);
 
-  for (const item of items) {
-    await addFileItem(item, fileTree, 0);
+  // Setup virtual scroll container
+  fileTree.innerHTML = '';
+  fileTree.classList.add('file-tree-virtual');
+
+  const sentinel = document.createElement('div');
+  sentinel.className = 'file-tree-sentinel';
+  fileTree.appendChild(sentinel);
+
+  const viewport = document.createElement('div');
+  viewport.className = 'file-tree-viewport';
+  fileTree.appendChild(viewport);
+
+  rebuildVisibleItems();
+  updateFileTreeSentinel(fileTree);
+  renderVisibleItems(fileTree);
+
+  // Attach scroll handler
+  fileTree.addEventListener('scroll', () => {
+    if (fileTreeScrollRAF) return;
+    fileTreeScrollRAF = requestAnimationFrame(() => {
+      fileTreeScrollRAF = null;
+      renderVisibleItems(fileTree);
+    });
+  });
+}
+
+function updateFileTreeSentinel(container) {
+  const sentinel = container.querySelector('.file-tree-sentinel');
+  if (sentinel) {
+    sentinel.style.height = `${visibleFileItems.length * FILE_ITEM_HEIGHT}px`;
   }
 }
 
-async function addFileItem(item, container, depth) {
-  const div = document.createElement('div');
-  div.className = `file-item ${item.isDirectory ? 'folder' : 'file'}`;
-  div.style.paddingLeft = `${12 + depth * 16}px`;
-  div.dataset.path = item.path;
+function renderVisibleItems(container) {
+  const viewport = container.querySelector('.file-tree-viewport');
+  if (!viewport) return;
 
-  const icon = item.isDirectory
-    ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>`
-    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>`;
+  const scrollTop = container.scrollTop;
+  const containerHeight = container.clientHeight;
+  const startIndex = Math.max(0, Math.floor(scrollTop / FILE_ITEM_HEIGHT) - VIRTUAL_OVERSCAN);
+  const endIndex = Math.min(
+    visibleFileItems.length,
+    Math.ceil((scrollTop + containerHeight) / FILE_ITEM_HEIGHT) + VIRTUAL_OVERSCAN
+  );
 
-  div.innerHTML = `${icon}<span>${item.name}</span>`;
-  container.appendChild(div);
+  viewport.style.transform = `translateY(${startIndex * FILE_ITEM_HEIGHT}px)`;
+  viewport.innerHTML = '';
 
-  div.addEventListener('click', async (e) => {
-    e.stopPropagation();
+  for (let i = startIndex; i < endIndex; i++) {
+    const item = visibleFileItems[i];
+    const div = document.createElement('div');
+    div.className = `file-item ${item.isDir ? 'folder' : 'file'}`;
+    div.style.height = `${FILE_ITEM_HEIGHT}px`;
+    div.style.paddingLeft = `${12 + item.depth * 16}px`;
+    div.dataset.path = item.path;
+    div.dataset.vindex = i;
 
-    if (item.isDirectory) {
-      const isExpanded = expandedFolders.has(item.path);
+    const isExpanded = item.isDir && expandedFolders.has(item.path);
+    const icon = item.isDir
+      ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>`
+      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>`;
 
-      if (isExpanded) {
-        expandedFolders.delete(item.path);
-        let next = div.nextElementSibling;
-        while (next && parseInt(next.style.paddingLeft) > parseInt(div.style.paddingLeft)) {
-          const toRemove = next;
-          next = next.nextElementSibling;
-          toRemove.remove();
-        }
-      } else {
-        expandedFolders.add(item.path);
-        const children = await loadFileTree(item.path);
-        let insertAfter = div;
-        for (const child of children) {
-          insertAfter = await addFileItemAfter(child, insertAfter, depth + 1);
-        }
-      }
-    } else {
-      await previewFile(item.path);
-    }
-  });
+    const chevron = item.isDir
+      ? `<svg class="folder-chevron${isExpanded ? ' expanded' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+      : '';
 
-  return div;
+    div.innerHTML = `${chevron}${icon}<span>${item.name}</span>`;
+    div.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handleFileTreeClick(item, container);
+    });
+    viewport.appendChild(div);
+  }
 }
 
-async function addFileItemAfter(item, afterElement, depth) {
-  const div = document.createElement('div');
-  div.className = `file-item ${item.isDirectory ? 'folder' : 'file'}`;
-  div.style.paddingLeft = `${12 + depth * 16}px`;
-  div.dataset.path = item.path;
-
-  const icon = item.isDirectory
-    ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>`
-    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>`;
-
-  div.innerHTML = `${icon}<span>${item.name}</span>`;
-  afterElement.after(div);
-
-  div.addEventListener('click', async (e) => {
-    e.stopPropagation();
-
-    if (item.isDirectory) {
-      const isExpanded = expandedFolders.has(item.path);
-
-      if (isExpanded) {
-        expandedFolders.delete(item.path);
-        let next = div.nextElementSibling;
-        while (next && parseInt(next.style.paddingLeft) > parseInt(div.style.paddingLeft)) {
-          const toRemove = next;
-          next = next.nextElementSibling;
-          toRemove.remove();
-        }
-      } else {
-        expandedFolders.add(item.path);
-        const children = await loadFileTree(item.path);
-        let insertAfter = div;
-        for (const child of children) {
-          insertAfter = await addFileItemAfter(child, insertAfter, depth + 1);
-        }
-      }
+async function handleFileTreeClick(item, container) {
+  if (item.isDir) {
+    if (expandedFolders.has(item.path)) {
+      expandedFolders.delete(item.path);
     } else {
-      await previewFile(item.path);
+      expandedFolders.add(item.path);
+      // Load children if not cached
+      if (!fileTreeData.has(item.path)) {
+        const children = await loadFileTree(item.path);
+        fileTreeData.set(item.path, children);
+      }
     }
-  });
-
-  return div;
+    rebuildVisibleItems();
+    updateFileTreeSentinel(container);
+    renderVisibleItems(container);
+  } else {
+    await previewFile(item.path);
+  }
 }
 
 function canShowLivePreview(extension) {
@@ -2617,6 +2797,7 @@ function makeDraggable(item, index) {
   item.setAttribute('draggable', 'true');
 
   item.addEventListener('dragstart', (e) => {
+    if (e.target.closest('.project-settings-btn')) { e.preventDefault(); return; }
     draggedProject = item;
     draggedIndex = index;
     item.classList.add('dragging');
@@ -2676,6 +2857,12 @@ function makeDraggable(item, index) {
 
     saveProjects(projects);
     renderProjects(projects);
+    // Re-apply active class to current project
+    if (currentProject) {
+      document.querySelectorAll('.project-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.path === currentProject.path);
+      });
+    }
   });
 }
 
@@ -2683,46 +2870,22 @@ function makeDraggable(item, index) {
 const quickOpenOverlay = document.getElementById('quick-open-overlay');
 const quickOpenInput = document.getElementById('quick-open-input');
 const quickOpenResults = document.getElementById('quick-open-results');
-let allFiles = [];
 let filteredFiles = [];
 let selectedFileIndex = 0;
+let quickOpenSearchTimeout = null;
 
-async function collectAllFiles(dirPath, basePath = '', files = []) {
-  const result = await window.electronAPI.readDirectory(dirPath);
-  if (!result.success) return files;
-
-  for (const item of result.items) {
-    const relativePath = basePath ? `${basePath}/${item.name}` : item.name;
-    if (item.isDirectory) {
-      // Skip common non-essential directories
-      if (!['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'venv'].includes(item.name)) {
-        await collectAllFiles(item.path, relativePath, files);
-      }
-    } else {
-      files.push({ name: item.name, path: item.path, relativePath });
-    }
+function renderQuickOpenResults(loading = false) {
+  if (loading) {
+    quickOpenResults.innerHTML = '<div class="quick-open-empty">Searching...</div>';
+    return;
   }
-  return files;
-}
 
-function fuzzyMatch(query, text) {
-  query = query.toLowerCase();
-  text = text.toLowerCase();
-
-  let queryIndex = 0;
-  for (let i = 0; i < text.length && queryIndex < query.length; i++) {
-    if (text[i] === query[queryIndex]) queryIndex++;
-  }
-  return queryIndex === query.length;
-}
-
-function renderQuickOpenResults() {
   if (filteredFiles.length === 0) {
     quickOpenResults.innerHTML = '<div class="quick-open-empty">No matching files</div>';
     return;
   }
 
-  quickOpenResults.innerHTML = filteredFiles.slice(0, 50).map((file, index) => `
+  quickOpenResults.innerHTML = filteredFiles.map((file, index) => `
     <div class="quick-open-item ${index === selectedFileIndex ? 'selected' : ''}" data-index="${index}">
       <svg class="quick-open-icon" width="16" height="16" viewBox="0 0 24 24" fill="none">
         <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/>
@@ -2742,12 +2905,12 @@ function renderQuickOpenResults() {
   });
 }
 
-function filterQuickOpenFiles(query) {
-  if (!query) {
-    filteredFiles = allFiles.slice(0, 50);
-  } else {
-    filteredFiles = allFiles.filter(f => fuzzyMatch(query, f.relativePath));
-  }
+async function searchQuickOpenFiles(query) {
+  if (!currentProject) return;
+  const skipDirs = await getSkipDirsForProject(currentProject.path);
+  renderQuickOpenResults(true);
+  const result = await window.electronAPI.searchFiles(currentProject.path, query, skipDirs, 50);
+  filteredFiles = result.results;
   selectedFileIndex = 0;
   renderQuickOpenResults();
 }
@@ -2759,16 +2922,14 @@ async function openQuickOpen() {
   quickOpenInput.value = '';
   quickOpenInput.focus();
 
-  // Collect files if not cached or project changed
-  allFiles = await collectAllFiles(currentProject.path);
-  filteredFiles = allFiles.slice(0, 50);
-  selectedFileIndex = 0;
-  renderQuickOpenResults();
+  // Load initial file list from server
+  searchQuickOpenFiles('');
 }
 
 function closeQuickOpen() {
   quickOpenOverlay.classList.remove('active');
   quickOpenInput.value = '';
+  clearTimeout(quickOpenSearchTimeout);
 }
 
 async function openQuickOpenFile(index) {
@@ -2780,7 +2941,10 @@ async function openQuickOpenFile(index) {
 }
 
 quickOpenInput.addEventListener('input', () => {
-  filterQuickOpenFiles(quickOpenInput.value);
+  clearTimeout(quickOpenSearchTimeout);
+  quickOpenSearchTimeout = setTimeout(() => {
+    searchQuickOpenFiles(quickOpenInput.value);
+  }, 150);
 });
 
 quickOpenInput.addEventListener('keydown', (e) => {
@@ -2811,6 +2975,8 @@ const globalSearchResults = document.getElementById('global-search-results');
 let globalSearchResultsList = [];
 let globalSearchSelectedIndex = 0;
 let globalSearchTimeout = null;
+let activeSearchRequestId = null;
+let globalSearchTotalMatches = 0;
 
 function openGlobalSearch() {
   if (!currentProject) return;
@@ -2820,12 +2986,22 @@ function openGlobalSearch() {
   globalSearchInput.focus();
   globalSearchResultsList = [];
   globalSearchSelectedIndex = 0;
+  globalSearchTotalMatches = 0;
   globalSearchResults.innerHTML = '<div class="global-search-empty">Type to search across all files</div>';
 }
 
 function closeGlobalSearch() {
   globalSearchOverlay.classList.remove('active');
   globalSearchInput.value = '';
+  cancelActiveSearch();
+}
+
+function cancelActiveSearch() {
+  if (activeSearchRequestId) {
+    window.electronAPI.cancelSearch(activeSearchRequestId);
+    activeSearchRequestId = null;
+  }
+  window.electronAPI.removeSearchListeners();
 }
 
 async function doGlobalSearch(query) {
@@ -2834,56 +3010,99 @@ async function doGlobalSearch(query) {
     return;
   }
 
+  // Cancel previous search
+  cancelActiveSearch();
+
+  const requestId = `search-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  activeSearchRequestId = requestId;
+  globalSearchResultsList = [];
+  globalSearchSelectedIndex = 0;
+  globalSearchTotalMatches = 0;
+
   globalSearchResults.innerHTML = '<div class="global-search-loading">Searching...</div>';
 
-  const result = await window.electronAPI.searchProject(currentProject.path, query);
+  const skipDirs = await getSkipDirsForProject(currentProject.path);
 
-  if (!result.success || result.results.length === 0) {
-    globalSearchResults.innerHTML = '<div class="global-search-empty">No results found</div>';
-    globalSearchResultsList = [];
-    return;
-  }
+  // Set up streaming listeners
+  window.electronAPI.onSearchResult((data) => {
+    if (data.requestId !== requestId) return;
 
-  globalSearchResultsList = result.results;
-  globalSearchSelectedIndex = 0;
-  renderGlobalSearchResults(query);
-}
-
-function renderGlobalSearchResults(query) {
-  const queryLower = query.toLowerCase();
-
-  globalSearchResults.innerHTML = globalSearchResultsList.map((r, index) => {
-    // Highlight the match in content
-    const contentLower = r.content.toLowerCase();
-    const matchIndex = contentLower.indexOf(queryLower);
-    let highlightedContent = escapeHtml(r.content);
-
-    if (matchIndex !== -1) {
-      const before = escapeHtml(r.content.substring(0, matchIndex));
-      const match = escapeHtml(r.content.substring(matchIndex, matchIndex + query.length));
-      const after = escapeHtml(r.content.substring(matchIndex + query.length));
-      highlightedContent = `${before}<mark>${match}</mark>${after}`;
+    // Append results for this file
+    for (const match of data.matches) {
+      globalSearchResultsList.push({
+        file: data.file,
+        relativePath: data.relativePath,
+        fileName: data.fileName,
+        line: match.line,
+        content: match.content
+      });
+      globalSearchTotalMatches++;
     }
 
-    return `
-      <div class="global-search-result ${index === globalSearchSelectedIndex ? 'selected' : ''}" data-index="${index}">
-        <div class="global-search-result-header">
-          <span class="global-search-filename">${r.fileName}</span>
-          <span class="global-search-path">${r.relativePath}</span>
-          <span class="global-search-line">:${r.line}</span>
-        </div>
-        <div class="global-search-content">${highlightedContent}</div>
-      </div>
-    `;
-  }).join('');
-
-  // Add click handlers
-  globalSearchResults.querySelectorAll('.global-search-result').forEach(item => {
-    item.addEventListener('click', () => {
-      const index = parseInt(item.dataset.index);
-      openGlobalSearchResult(index);
-    });
+    // Incrementally render
+    appendSearchResultsDOM(data, query);
   });
+
+  window.electronAPI.onSearchComplete((data) => {
+    if (data.requestId !== requestId) return;
+    activeSearchRequestId = null;
+
+    // Remove spinner
+    const spinner = globalSearchResults.querySelector('.global-search-loading');
+    if (spinner) spinner.remove();
+
+    if (globalSearchTotalMatches === 0) {
+      globalSearchResults.innerHTML = '<div class="global-search-empty">No results found</div>';
+    } else {
+      // Add summary at top
+      const summary = globalSearchResults.querySelector('.global-search-summary');
+      if (summary) {
+        summary.textContent = `${globalSearchTotalMatches} results in ${new Set(globalSearchResultsList.map(r => r.file)).size} files`;
+      }
+    }
+
+    window.electronAPI.removeSearchListeners();
+  });
+
+  window.electronAPI.searchProjectStream(currentProject.path, query, skipDirs, requestId);
+}
+
+function appendSearchResultsDOM(data, query) {
+  // Remove the spinner if first result
+  const spinner = globalSearchResults.querySelector('.global-search-loading');
+  if (spinner) {
+    globalSearchResults.innerHTML = '<div class="global-search-summary global-search-loading">Searching...</div>';
+  }
+
+  const queryLower = query.toLowerCase();
+
+  for (const match of data.matches) {
+    const index = globalSearchResultsList.length - data.matches.length + data.matches.indexOf(match);
+    const contentLower = match.content.toLowerCase();
+    const matchIndex = contentLower.indexOf(queryLower);
+    let highlightedContent = escapeHtml(match.content);
+
+    if (matchIndex !== -1) {
+      const before = escapeHtml(match.content.substring(0, matchIndex));
+      const matched = escapeHtml(match.content.substring(matchIndex, matchIndex + query.length));
+      const after = escapeHtml(match.content.substring(matchIndex + query.length));
+      highlightedContent = `${before}<mark>${matched}</mark>${after}`;
+    }
+
+    const div = document.createElement('div');
+    div.className = 'global-search-result';
+    div.dataset.index = index;
+    div.innerHTML = `
+      <div class="global-search-result-header">
+        <span class="global-search-filename">${data.fileName}</span>
+        <span class="global-search-path">${data.relativePath}</span>
+        <span class="global-search-line">:${match.line}</span>
+      </div>
+      <div class="global-search-content">${highlightedContent}</div>
+    `;
+    div.addEventListener('click', () => openGlobalSearchResult(index));
+    globalSearchResults.appendChild(div);
+  }
 }
 
 async function openGlobalSearchResult(index) {
@@ -2905,11 +3124,11 @@ globalSearchInput.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
     globalSearchSelectedIndex = Math.min(globalSearchSelectedIndex + 1, globalSearchResultsList.length - 1);
-    renderGlobalSearchResults(globalSearchInput.value);
+    updateGlobalSearchSelection();
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
     globalSearchSelectedIndex = Math.max(globalSearchSelectedIndex - 1, 0);
-    renderGlobalSearchResults(globalSearchInput.value);
+    updateGlobalSearchSelection();
   } else if (e.key === 'Enter') {
     e.preventDefault();
     openGlobalSearchResult(globalSearchSelectedIndex);
@@ -2918,61 +3137,37 @@ globalSearchInput.addEventListener('keydown', (e) => {
   }
 });
 
+function updateGlobalSearchSelection() {
+  globalSearchResults.querySelectorAll('.global-search-result').forEach((el, i) => {
+    el.classList.toggle('selected', i === globalSearchSelectedIndex);
+    if (i === globalSearchSelectedIndex) {
+      el.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
 globalSearchOverlay.addEventListener('click', (e) => {
   if (e.target === globalSearchOverlay) closeGlobalSearch();
 });
 
 // ===== Keyboard Shortcuts =====
 document.addEventListener('keydown', (e) => {
-  // Tab switching
-  if ((e.metaKey || e.ctrlKey) && ['1', '2', '3', '4'].includes(e.key)) {
-    e.preventDefault();
-    const tabs = ['preview', 'files', 'git', 'notes'];
-    const tab = document.querySelector(`[data-tab="${tabs[parseInt(e.key) - 1]}"]`);
-    if (tab) tab.click();
-  }
-
-  // New terminal: Cmd+T
-  if ((e.metaKey || e.ctrlKey) && e.key === 't') {
-    e.preventDefault();
-    if (currentProject) {
-      createNewTab(currentProject.path, currentProject.path);
+  if (capturingShortcutId) return;
+  // More specific bindings (with shift) should match first
+  const sorted = [...SHORTCUT_REGISTRY].sort((a, b) => {
+    const ba = getEffectiveBinding(a.id);
+    const bb = getEffectiveBinding(b.id);
+    const sa = ba && ba.shiftKey ? 1 : 0;
+    const sb = bb && bb.shiftKey ? 1 : 0;
+    return sb - sa;
+  });
+  for (const entry of sorted) {
+    const binding = getEffectiveBinding(entry.id);
+    if (bindingMatchesEvent(binding, e)) {
+      e.preventDefault();
+      entry.action();
+      return;
     }
-  }
-
-  // Close terminal: Cmd+W
-  if ((e.metaKey || e.ctrlKey) && e.key === 'w') {
-    if (currentProject && projectData.has(currentProject.path)) {
-      const data = projectData.get(currentProject.path);
-      if (data.tabs.length > 1) {
-        e.preventDefault();
-        closeTab(data.activeTabIndex);
-      }
-    }
-  }
-
-  // Terminal search: Cmd+F
-  if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
-    e.preventDefault();
-    openTerminalSearch();
-  }
-
-  // Quick file open: Cmd+P
-  if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
-    e.preventDefault();
-    openQuickOpen();
-  }
-
-  // Global search: Cmd+Shift+F
-  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'f') {
-    e.preventDefault();
-    openGlobalSearch();
-  }
-
-  // Split terminal: Cmd+\
-  if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
-    e.preventDefault();
-    splitTerminal();
   }
 });
 
@@ -2983,7 +3178,9 @@ const settingsName = document.getElementById('settings-name');
 const settingsShell = document.getElementById('settings-shell');
 const settingsEnv = document.getElementById('settings-env');
 const settingsStartup = document.getElementById('settings-startup');
+const settingsSkipDirs = document.getElementById('settings-skip-dirs');
 let editingProjectPath = null;
+let cachedDefaultSkipDirs = null;
 
 const PROJECT_SETTINGS_KEY = 'programming-interface-project-settings';
 
@@ -3004,7 +3201,18 @@ function deleteProjectSettings(projectPath) {
   localStorage.setItem(PROJECT_SETTINGS_KEY, JSON.stringify(allSettings));
 }
 
-function openProjectSettings(projectPath) {
+async function getSkipDirsForProject(projectPath) {
+  const settings = getProjectSettings(projectPath);
+  if (settings.skipDirs) {
+    return settings.skipDirs.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (!cachedDefaultSkipDirs) {
+    cachedDefaultSkipDirs = await window.electronAPI.getDefaultSkipDirs();
+  }
+  return cachedDefaultSkipDirs;
+}
+
+async function openProjectSettings(projectPath) {
   editingProjectPath = projectPath;
   const projects = getProjects();
   const project = projects.find(p => p.path === projectPath);
@@ -3015,6 +3223,16 @@ function openProjectSettings(projectPath) {
   settingsShell.value = settings.shell || '';
   settingsEnv.value = settings.env || '';
   settingsStartup.value = settings.startup || '';
+
+  // Load skip dirs - show project-specific or defaults
+  if (settings.skipDirs) {
+    settingsSkipDirs.value = settings.skipDirs;
+  } else {
+    if (!cachedDefaultSkipDirs) {
+      cachedDefaultSkipDirs = await window.electronAPI.getDefaultSkipDirs();
+    }
+    settingsSkipDirs.value = cachedDefaultSkipDirs.join(', ');
+  }
 
   settingsOverlay.classList.add('active');
 }
@@ -3046,7 +3264,8 @@ document.getElementById('settings-save').addEventListener('click', () => {
   saveProjectSettings(editingProjectPath, {
     shell: settingsShell.value,
     env: settingsEnv.value,
-    startup: settingsStartup.value
+    startup: settingsStartup.value,
+    skipDirs: settingsSkipDirs.value
   });
 
   closeProjectSettings();
@@ -3096,6 +3315,239 @@ document.getElementById('settings-remove').addEventListener('click', () => {
 
     closeProjectSettings();
   }
+});
+
+// ===== Terminal Profiles =====
+const TERMINAL_PROFILES_KEY = 'programming-interface-terminal-profiles';
+const ACTIVE_PROFILE_KEY = 'programming-interface-active-profile';
+
+function getTerminalProfiles() {
+  return JSON.parse(localStorage.getItem(TERMINAL_PROFILES_KEY) || '[]');
+}
+
+function saveTerminalProfiles(profiles) {
+  localStorage.setItem(TERMINAL_PROFILES_KEY, JSON.stringify(profiles));
+}
+
+function getActiveProfileName() {
+  return localStorage.getItem(ACTIVE_PROFILE_KEY) || 'Default';
+}
+
+function setActiveProfileName(name) {
+  localStorage.setItem(ACTIVE_PROFILE_KEY, name);
+}
+
+function getActiveProfile() {
+  const name = getActiveProfileName();
+  if (name === 'Default') return null;
+  const profiles = getTerminalProfiles();
+  return profiles.find(p => p.name === name) || null;
+}
+
+function renderProfileDropdown() {
+  const dropdown = document.getElementById('profile-dropdown');
+  const profiles = getTerminalProfiles();
+  const activeName = getActiveProfileName();
+
+  let html = `
+    <button class="profile-option" data-profile="Default">
+      <span class="check">${activeName === 'Default' ? '✓' : ''}</span>
+      <span class="profile-option-name">Default</span>
+    </button>
+  `;
+
+  profiles.forEach(p => {
+    html += `
+      <button class="profile-option" data-profile="${p.name}">
+        <span class="check">${activeName === p.name ? '✓' : ''}</span>
+        <span class="profile-option-name">${p.name}</span>
+      </button>
+    `;
+  });
+
+  html += '<div class="profile-divider"></div>';
+  html += '<button class="profile-option" data-action="manage"><span class="check"></span><span class="profile-option-name">Manage Profiles...</span></button>';
+
+  dropdown.innerHTML = html;
+
+  dropdown.querySelectorAll('.profile-option').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const action = btn.dataset.action;
+      if (action === 'manage') {
+        dropdown.classList.remove('active');
+        openProfileManager();
+        return;
+      }
+      const profileName = btn.dataset.profile;
+      setActiveProfileName(profileName);
+      dropdown.classList.remove('active');
+      renderProfileDropdown();
+    });
+  });
+}
+
+document.getElementById('profile-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const dropdown = document.getElementById('profile-dropdown');
+  const wasActive = dropdown.classList.contains('active');
+  // Close any other open dropdowns
+  document.querySelectorAll('.profile-dropdown.active').forEach(d => d.classList.remove('active'));
+  if (!wasActive) {
+    renderProfileDropdown();
+    dropdown.classList.add('active');
+  }
+});
+
+// Close profile dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.profile-selector')) {
+    document.getElementById('profile-dropdown').classList.remove('active');
+  }
+});
+
+function openProfileManager() {
+  const overlay = document.getElementById('profile-overlay');
+  overlay.classList.add('active');
+  renderProfileList();
+}
+
+function closeProfileManager() {
+  document.getElementById('profile-overlay').classList.remove('active');
+}
+
+document.getElementById('profile-close').addEventListener('click', closeProfileManager);
+document.getElementById('profile-manager-close').addEventListener('click', closeProfileManager);
+document.getElementById('profile-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'profile-overlay') closeProfileManager();
+});
+
+function renderProfileList() {
+  const content = document.getElementById('profile-manager-content');
+  const profiles = getTerminalProfiles();
+
+  if (profiles.length === 0) {
+    content.innerHTML = '<div class="empty-state" style="padding:24px"><p>No custom profiles</p><span>Click "Add Profile" to create one</span></div>';
+  } else {
+    content.innerHTML = profiles.map((p, i) => `
+      <div class="profile-item" data-index="${i}">
+        <span class="profile-item-name">${p.name}</span>
+        <span class="profile-item-shell">${p.shell || 'default'}</span>
+        <div class="profile-item-actions">
+          <button class="edit" data-index="${i}" title="Edit">&#9998;</button>
+          <button class="delete" data-index="${i}" title="Delete">&#10005;</button>
+        </div>
+      </div>
+    `).join('');
+
+    content.querySelectorAll('.profile-item-actions .edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.index);
+        editProfile(idx);
+      });
+    });
+
+    content.querySelectorAll('.profile-item-actions .delete').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.index);
+        const profiles = getTerminalProfiles();
+        const removed = profiles[idx];
+        profiles.splice(idx, 1);
+        saveTerminalProfiles(profiles);
+        // If active profile was deleted, reset to Default
+        if (getActiveProfileName() === removed.name) {
+          setActiveProfileName('Default');
+        }
+        renderProfileList();
+      });
+    });
+  }
+}
+
+document.getElementById('profile-add-btn').addEventListener('click', () => {
+  editProfile(-1);
+});
+
+function editProfile(index) {
+  const content = document.getElementById('profile-manager-content');
+  const profiles = getTerminalProfiles();
+  const profile = index >= 0 ? profiles[index] : { name: '', shell: '', env: '', fontSize: '', fontFamily: '' };
+
+  content.innerHTML = `
+    <div class="profile-edit-form">
+      <div class="settings-section">
+        <label class="settings-label">Profile Name</label>
+        <input type="text" class="settings-input" id="profile-edit-name" value="${profile.name}" placeholder="My Profile">
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Shell</label>
+        <select class="settings-select" id="profile-edit-shell">
+          <option value="" ${!profile.shell ? 'selected' : ''}>System default</option>
+          <option value="/bin/zsh" ${profile.shell === '/bin/zsh' ? 'selected' : ''}>Zsh (/bin/zsh)</option>
+          <option value="/bin/bash" ${profile.shell === '/bin/bash' ? 'selected' : ''}>Bash (/bin/bash)</option>
+          <option value="/bin/sh" ${profile.shell === '/bin/sh' ? 'selected' : ''}>Sh (/bin/sh)</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Environment Variables</label>
+        <textarea class="settings-input" id="profile-edit-env" rows="3" placeholder="KEY=value&#10;ANOTHER=value">${profile.env || ''}</textarea>
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Font Size</label>
+        <input type="number" class="settings-input" id="profile-edit-fontsize" value="${profile.fontSize || ''}" placeholder="13" min="8" max="32">
+      </div>
+      <div class="settings-section">
+        <label class="settings-label">Font Family</label>
+        <input type="text" class="settings-input" id="profile-edit-fontfamily" value="${profile.fontFamily || ''}" placeholder='"SF Mono", "Fira Code", monospace'>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="settings-btn settings-btn-secondary" id="profile-edit-cancel">Cancel</button>
+        <button class="settings-btn settings-btn-primary" id="profile-edit-save">Save</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('profile-edit-cancel').addEventListener('click', renderProfileList);
+  document.getElementById('profile-edit-save').addEventListener('click', () => {
+    const name = document.getElementById('profile-edit-name').value.trim();
+    if (!name) return;
+
+    const updated = {
+      name,
+      shell: document.getElementById('profile-edit-shell').value,
+      env: document.getElementById('profile-edit-env').value,
+      fontSize: document.getElementById('profile-edit-fontsize').value,
+      fontFamily: document.getElementById('profile-edit-fontfamily').value
+    };
+
+    const profiles = getTerminalProfiles();
+    if (index >= 0) {
+      // If name changed and was active, update active
+      if (getActiveProfileName() === profiles[index].name && profiles[index].name !== name) {
+        setActiveProfileName(name);
+      }
+      profiles[index] = updated;
+    } else {
+      profiles.push(updated);
+    }
+    saveTerminalProfiles(profiles);
+    renderProfileList();
+  });
+}
+
+// ===== Broadcast Mode =====
+function toggleBroadcastMode() {
+  broadcastMode = !broadcastMode;
+  const btn = document.getElementById('broadcast-btn');
+  if (broadcastMode) {
+    btn.classList.add('active');
+  } else {
+    btn.classList.remove('active');
+  }
+  renderTerminalTabs();
+}
+
+document.getElementById('broadcast-btn').addEventListener('click', () => {
+  toggleBroadcastMode();
 });
 
 // ===== Session Restore =====
@@ -3226,5 +3678,220 @@ if (window.electronAPI.onUpdateStatus) {
     }
   });
 }
+
+// ===== Shortcut Editor =====
+function openShortcutEditor() {
+  const overlay = document.getElementById('shortcut-editor-overlay');
+  overlay.classList.add('active');
+  renderShortcutList();
+}
+
+function closeShortcutEditor() {
+  const overlay = document.getElementById('shortcut-editor-overlay');
+  overlay.classList.remove('active');
+  capturingShortcutId = null;
+}
+
+function renderShortcutList() {
+  const container = document.getElementById('shortcut-editor-list');
+  const categories = {};
+  for (const entry of SHORTCUT_REGISTRY) {
+    if (!categories[entry.category]) categories[entry.category] = [];
+    categories[entry.category].push(entry);
+  }
+  container.innerHTML = Object.entries(categories).map(([cat, entries]) => `
+    <div class="shortcut-category-header">${cat}</div>
+    ${entries.map(entry => {
+      const binding = getEffectiveBinding(entry.id);
+      const isCapturing = capturingShortcutId === entry.id;
+      return `
+        <div class="shortcut-row" data-id="${entry.id}">
+          <span class="shortcut-row-label">${entry.label}</span>
+          <span class="shortcut-row-binding ${isCapturing ? 'capturing' : ''}">${isCapturing ? 'Press shortcut...' : (binding ? formatShortcut(binding) : '—')}</span>
+        </div>
+      `;
+    }).join('')}
+  `).join('');
+
+  container.querySelectorAll('.shortcut-row').forEach(row => {
+    row.addEventListener('click', () => {
+      capturingShortcutId = row.dataset.id;
+      renderShortcutList();
+    });
+  });
+}
+
+// Capture handler for shortcut editor
+document.addEventListener('keydown', (e) => {
+  if (!capturingShortcutId) return;
+  if (!e.metaKey && !e.ctrlKey && e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.key === 'Escape') {
+    capturingShortcutId = null;
+    renderShortcutList();
+    return;
+  }
+
+  const newBinding = {
+    key: e.key === '|' ? '\\' : e.key,
+    metaKey: true,
+    shiftKey: e.shiftKey,
+    altKey: e.altKey
+  };
+
+  const custom = getCustomShortcuts();
+  custom[capturingShortcutId] = newBinding;
+  saveCustomShortcuts(custom);
+  capturingShortcutId = null;
+  renderShortcutList();
+}, true);
+
+document.getElementById('shortcut-editor-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'shortcut-editor-overlay') closeShortcutEditor();
+});
+
+document.getElementById('shortcut-reset-all').addEventListener('click', () => {
+  localStorage.removeItem(CUSTOM_SHORTCUTS_KEY);
+  capturingShortcutId = null;
+  renderShortcutList();
+});
+
+document.getElementById('shortcut-done').addEventListener('click', closeShortcutEditor);
+document.getElementById('shortcut-editor-close').addEventListener('click', closeShortcutEditor);
+
+// ===== Command Palette =====
+let commandPaletteSelectedIndex = 0;
+let filteredCommands = [];
+
+function openCommandPalette() {
+  const overlay = document.getElementById('command-palette-overlay');
+  const input = document.getElementById('command-palette-input');
+  overlay.classList.add('active');
+  input.value = '';
+  commandPaletteSelectedIndex = 0;
+  filteredCommands = [...SHORTCUT_REGISTRY];
+  renderCommandPaletteResults();
+  input.focus();
+}
+
+function closeCommandPalette() {
+  document.getElementById('command-palette-overlay').classList.remove('active');
+}
+
+function fuzzyMatch(query, text) {
+  const q = query.toLowerCase();
+  const t = text.toLowerCase();
+  let qi = 0;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) qi++;
+  }
+  return qi === q.length;
+}
+
+function filterCommands(query) {
+  if (!query) return [...SHORTCUT_REGISTRY];
+  return SHORTCUT_REGISTRY.filter(e => fuzzyMatch(query, e.label) || fuzzyMatch(query, e.category));
+}
+
+function renderCommandPaletteResults() {
+  const results = document.getElementById('command-palette-results');
+  if (filteredCommands.length === 0) {
+    results.innerHTML = '<div class="command-palette-empty">No matching commands</div>';
+    return;
+  }
+  results.innerHTML = filteredCommands.map((cmd, i) => {
+    const binding = getEffectiveBinding(cmd.id);
+    return `
+      <div class="command-palette-item ${i === commandPaletteSelectedIndex ? 'selected' : ''}" data-index="${i}">
+        <span class="command-palette-category">${cmd.category}</span>
+        <span class="command-palette-label">${cmd.label}</span>
+        ${binding ? `<span class="command-palette-shortcut">${formatShortcut(binding)}</span>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  results.querySelectorAll('.command-palette-item').forEach(item => {
+    item.addEventListener('click', () => executeCommand(parseInt(item.dataset.index)));
+    item.addEventListener('mouseenter', () => {
+      commandPaletteSelectedIndex = parseInt(item.dataset.index);
+      updateCommandPaletteSelection();
+    });
+  });
+}
+
+function updateCommandPaletteSelection() {
+  const results = document.getElementById('command-palette-results');
+  results.querySelectorAll('.command-palette-item').forEach((el, i) => {
+    el.classList.toggle('selected', i === commandPaletteSelectedIndex);
+    if (i === commandPaletteSelectedIndex) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function executeCommand(index) {
+  if (index >= 0 && index < filteredCommands.length) {
+    closeCommandPalette();
+    filteredCommands[index].action();
+  }
+}
+
+document.getElementById('command-palette-input').addEventListener('input', (e) => {
+  filteredCommands = filterCommands(e.target.value);
+  commandPaletteSelectedIndex = 0;
+  renderCommandPaletteResults();
+});
+
+document.getElementById('command-palette-input').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    commandPaletteSelectedIndex = Math.min(commandPaletteSelectedIndex + 1, filteredCommands.length - 1);
+    updateCommandPaletteSelection();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    commandPaletteSelectedIndex = Math.max(commandPaletteSelectedIndex - 1, 0);
+    updateCommandPaletteSelection();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    executeCommand(commandPaletteSelectedIndex);
+  } else if (e.key === 'Escape') {
+    closeCommandPalette();
+  }
+});
+
+document.getElementById('command-palette-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'command-palette-overlay') closeCommandPalette();
+});
+
+// ===== Tab Overflow Handling =====
+function updateTabScrollButtons() {
+  const tabs = document.getElementById('terminal-tabs');
+  const leftBtn = document.getElementById('tab-scroll-left');
+  const rightBtn = document.getElementById('tab-scroll-right');
+  if (!tabs || !leftBtn || !rightBtn) return;
+
+  const hasOverflow = tabs.scrollWidth > tabs.clientWidth + 1;
+  leftBtn.classList.toggle('visible', hasOverflow && tabs.scrollLeft > 0);
+  rightBtn.classList.toggle('visible', hasOverflow && tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1);
+}
+
+function scrollTabsBy(delta) {
+  const tabs = document.getElementById('terminal-tabs');
+  tabs.scrollBy({ left: delta, behavior: 'smooth' });
+  setTimeout(updateTabScrollButtons, 300);
+}
+
+function scrollActiveTabIntoView() {
+  const tabs = document.getElementById('terminal-tabs');
+  const activeTab = tabs.querySelector('.terminal-tab.active');
+  if (activeTab) {
+    activeTab.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    setTimeout(updateTabScrollButtons, 300);
+  }
+}
+
+document.getElementById('tab-scroll-left').addEventListener('click', () => scrollTabsBy(-120));
+document.getElementById('tab-scroll-right').addEventListener('click', () => scrollTabsBy(120));
+document.getElementById('terminal-tabs').addEventListener('scroll', updateTabScrollButtons);
 
 console.log('Programming Interface loaded');

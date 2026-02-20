@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pty = require('node-pty');
@@ -102,6 +102,15 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+// ===== Open External URLs =====
+ipcMain.handle('open-external', async (event, url) => {
+  if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+    await shell.openExternal(url);
+    return true;
+  }
+  return false;
 });
 
 // ===== Folder Dialog =====
@@ -571,10 +580,10 @@ ipcMain.handle('git-blame', async (event, { cwd, file }) => {
 });
 
 // ===== Global Search =====
-const SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', '__pycache__', 'venv', '.venv', 'coverage', '.cache'];
+const DEFAULT_SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', '.cache', 'coverage', '__pycache__', '.vscode', '.idea'];
 const BINARY_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.pdf', '.zip', '.tar', '.gz', '.exe', '.dll', '.so', '.dylib'];
 
-async function searchInDirectory(dir, query, results, maxResults = 100) {
+async function searchInDirectory(dir, query, results, skipDirs = DEFAULT_SKIP_DIRS, maxResults = 100, rootDir = dir) {
   if (results.length >= maxResults) return;
 
   try {
@@ -586,8 +595,8 @@ async function searchInDirectory(dir, query, results, maxResults = 100) {
       const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.includes(entry.name) && !entry.name.startsWith('.')) {
-          await searchInDirectory(fullPath, query, results, maxResults);
+        if (!skipDirs.includes(entry.name) && !entry.name.startsWith('.')) {
+          await searchInDirectory(fullPath, query, results, skipDirs, maxResults, rootDir);
         }
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
@@ -602,7 +611,7 @@ async function searchInDirectory(dir, query, results, maxResults = 100) {
             if (lines[i].toLowerCase().includes(queryLower)) {
               results.push({
                 file: fullPath,
-                relativePath: path.relative(dir, fullPath).split(path.sep).slice(1).join('/') || entry.name,
+                relativePath: path.relative(rootDir, fullPath),
                 line: i + 1,
                 content: lines[i].trim().substring(0, 200),
                 fileName: entry.name
@@ -619,15 +628,148 @@ async function searchInDirectory(dir, query, results, maxResults = 100) {
   }
 }
 
-ipcMain.handle('search-project', async (event, { cwd, query }) => {
+ipcMain.handle('search-project', async (event, { cwd, query, skipDirs }) => {
   if (!query || query.length < 2) {
     return { success: true, results: [] };
   }
 
   const results = [];
-  await searchInDirectory(cwd, query, results, 100);
+  await searchInDirectory(cwd, query, results, skipDirs || DEFAULT_SKIP_DIRS, 100, cwd);
 
   return { success: true, results };
+});
+
+// ===== File Search (Quick Open) =====
+const fileIndexCache = new Map(); // Map<dir, {files, timestamp}>
+
+async function buildFileIndex(dir, skipDirs = DEFAULT_SKIP_DIRS, basePath = '', files = []) {
+  try {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!skipDirs.includes(entry.name)) {
+          await buildFileIndex(fullPath, skipDirs, relativePath, files);
+        }
+      } else if (entry.isFile()) {
+        files.push({ name: entry.name, path: fullPath, relativePath });
+      }
+    }
+  } catch (e) {
+    // Skip unreadable directories
+  }
+  return files;
+}
+
+function serverFuzzyMatch(query, text) {
+  const queryLower = query.toLowerCase();
+  const textLower = text.toLowerCase();
+  let qi = 0;
+  let score = 0;
+  let lastMatchIndex = -1;
+  for (let i = 0; i < textLower.length && qi < queryLower.length; i++) {
+    if (textLower[i] === queryLower[qi]) {
+      score += (lastMatchIndex === i - 1) ? 2 : 1; // Consecutive bonus
+      if (i === 0 || text[i - 1] === '/' || text[i - 1] === '\\' || text[i - 1] === '.' || text[i - 1] === '-' || text[i - 1] === '_') {
+        score += 3; // Word boundary bonus
+      }
+      lastMatchIndex = i;
+      qi++;
+    }
+  }
+  return qi === queryLower.length ? score : 0;
+}
+
+ipcMain.handle('search-files', async (event, { cwd, query, skipDirs, limit = 50 }) => {
+  const resolvedSkipDirs = skipDirs || DEFAULT_SKIP_DIRS;
+  const cached = fileIndexCache.get(cwd);
+  let files;
+  if (cached && (Date.now() - cached.timestamp < 30000)) {
+    files = cached.files;
+  } else {
+    files = await buildFileIndex(cwd, resolvedSkipDirs);
+    fileIndexCache.set(cwd, { files, timestamp: Date.now() });
+  }
+
+  if (!query || query.length === 0) {
+    return { results: files.slice(0, limit), hasMore: files.length > limit };
+  }
+
+  const scored = [];
+  for (const file of files) {
+    const score = serverFuzzyMatch(query, file.relativePath);
+    if (score > 0) scored.push({ ...file, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const results = scored.slice(0, limit).map(({ score, ...rest }) => rest);
+  return { results, hasMore: scored.length > limit };
+});
+
+// ===== Streaming Search =====
+const activeSearches = new Map(); // requestId -> { cancelled: boolean }
+
+ipcMain.on('search-project-stream', async (event, { cwd, query, skipDirs, requestId }) => {
+  const resolvedSkipDirs = skipDirs || DEFAULT_SKIP_DIRS;
+  const searchState = { cancelled: false };
+  activeSearches.set(requestId, searchState);
+
+  async function searchStream(dir) {
+    if (searchState.cancelled) return;
+    try {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (searchState.cancelled) return;
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (!resolvedSkipDirs.includes(entry.name) && !entry.name.startsWith('.')) {
+            await searchStream(fullPath);
+          }
+        } else if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (BINARY_EXTENSIONS.includes(ext)) continue;
+          try {
+            const content = await fs.promises.readFile(fullPath, 'utf-8');
+            const lines = content.split('\n');
+            const queryLower = query.toLowerCase();
+            const matches = [];
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].toLowerCase().includes(queryLower)) {
+                matches.push({ line: i + 1, content: lines[i].trim().substring(0, 200) });
+              }
+            }
+            if (matches.length > 0 && !searchState.cancelled) {
+              event.sender.send('search-result', {
+                requestId,
+                file: fullPath,
+                relativePath: path.relative(cwd, fullPath),
+                fileName: entry.name,
+                matches
+              });
+            }
+          } catch (e) { /* skip unreadable */ }
+        }
+      }
+    } catch (e) { /* skip unreadable dirs */ }
+  }
+
+  await searchStream(cwd);
+  if (!searchState.cancelled) {
+    event.sender.send('search-complete', { requestId });
+  }
+  activeSearches.delete(requestId);
+});
+
+ipcMain.on('search-cancel', (event, requestId) => {
+  const searchState = activeSearches.get(requestId);
+  if (searchState) {
+    searchState.cancelled = true;
+  }
+});
+
+ipcMain.handle('get-default-skip-dirs', () => {
+  return DEFAULT_SKIP_DIRS;
 });
 
 // ===== Utility =====

@@ -82,7 +82,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitBlame: (cwd, file) => ipcRenderer.invoke('git-blame', { cwd, file }),
 
   // Search
-  searchProject: (cwd, query) => ipcRenderer.invoke('search-project', { cwd, query }),
+  searchProject: (cwd, query, skipDirs) => ipcRenderer.invoke('search-project', { cwd, query, skipDirs }),
+  searchFiles: (cwd, query, skipDirs, limit) => ipcRenderer.invoke('search-files', { cwd, query, skipDirs, limit }),
+  searchProjectStream: (cwd, query, skipDirs, requestId) => ipcRenderer.send('search-project-stream', { cwd, query, skipDirs, requestId }),
+  onSearchResult: (cb) => ipcRenderer.on('search-result', (e, data) => cb(data)),
+  onSearchComplete: (cb) => ipcRenderer.on('search-complete', (e, data) => cb(data)),
+  cancelSearch: (requestId) => ipcRenderer.send('search-cancel', requestId),
+  removeSearchListeners: () => { ipcRenderer.removeAllListeners('search-result'); ipcRenderer.removeAllListeners('search-complete'); },
+  getDefaultSkipDirs: () => ipcRenderer.invoke('get-default-skip-dirs'),
+
+  // Open external URLs
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
   // Utility
   getHomeDirectory: () => ipcRenderer.invoke('get-home-directory'),
