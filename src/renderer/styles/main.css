@@ -458,6 +458,72 @@ body {
   font-family: inherit;
 }
 
+/* ===== Syntax Highlighting (highlight.js) ===== */
+.hljs {
+  background: transparent !important;
+  color: inherit;
+}
+
+/* Light theme syntax colors */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in { color: #0033b3; }
+.hljs-string,
+.hljs-attr { color: #067d17; }
+.hljs-number,
+.hljs-literal { color: #1750eb; }
+.hljs-comment,
+.hljs-doctag { color: #8c8c8c; font-style: italic; }
+.hljs-function .hljs-title,
+.hljs-title.function_,
+.hljs-title.class_ { color: #7a3e9d; }
+.hljs-type,
+.hljs-class .hljs-title { color: #7a3e9d; }
+.hljs-variable,
+.hljs-template-variable { color: #871094; }
+.hljs-regexp { color: #264eff; }
+.hljs-symbol,
+.hljs-bullet { color: #0033b3; }
+.hljs-meta { color: #9e880d; }
+.hljs-tag { color: #0033b3; }
+.hljs-name { color: #0033b3; }
+.hljs-attribute { color: #871094; }
+.hljs-selector-id,
+.hljs-selector-class { color: #7a3e9d; }
+.hljs-params { color: #383a42; }
+.hljs-addition { color: #067d17; background: rgba(6, 125, 23, 0.1); }
+.hljs-deletion { color: #d44950; background: rgba(212, 73, 80, 0.1); }
+
+/* Dark theme syntax colors */
+[data-theme="dark"] .hljs-keyword,
+[data-theme="dark"] .hljs-selector-tag,
+[data-theme="dark"] .hljs-built_in { color: #569cd6; }
+[data-theme="dark"] .hljs-string,
+[data-theme="dark"] .hljs-attr { color: #ce9178; }
+[data-theme="dark"] .hljs-number,
+[data-theme="dark"] .hljs-literal { color: #b5cea8; }
+[data-theme="dark"] .hljs-comment,
+[data-theme="dark"] .hljs-doctag { color: #6a9955; font-style: italic; }
+[data-theme="dark"] .hljs-function .hljs-title,
+[data-theme="dark"] .hljs-title.function_,
+[data-theme="dark"] .hljs-title.class_ { color: #dcdcaa; }
+[data-theme="dark"] .hljs-type,
+[data-theme="dark"] .hljs-class .hljs-title { color: #4ec9b0; }
+[data-theme="dark"] .hljs-variable,
+[data-theme="dark"] .hljs-template-variable { color: #9cdcfe; }
+[data-theme="dark"] .hljs-regexp { color: #d16969; }
+[data-theme="dark"] .hljs-symbol,
+[data-theme="dark"] .hljs-bullet { color: #569cd6; }
+[data-theme="dark"] .hljs-meta { color: #d7ba7d; }
+[data-theme="dark"] .hljs-tag { color: #569cd6; }
+[data-theme="dark"] .hljs-name { color: #569cd6; }
+[data-theme="dark"] .hljs-attribute { color: #9cdcfe; }
+[data-theme="dark"] .hljs-selector-id,
+[data-theme="dark"] .hljs-selector-class { color: #d7ba7d; }
+[data-theme="dark"] .hljs-params { color: #e8e6e3; }
+[data-theme="dark"] .hljs-addition { color: #6a9955; background: rgba(106, 153, 85, 0.15); }
+[data-theme="dark"] .hljs-deletion { color: #f44747; background: rgba(244, 71, 71, 0.15); }
+
 /* ===== Loading State ===== */
 .loading {
   padding: 24px;

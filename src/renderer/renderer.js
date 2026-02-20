@@ -2,6 +2,7 @@ const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { SearchAddon } = require('@xterm/addon-search');
 const { marked } = require('marked');
+const hljs = require('highlight.js/lib/common');
 
 // Configure marked
 marked.setOptions({
@@ -398,6 +399,34 @@ async function createNewTab(projectPath, cwd, name = null) {
   // Handle input
   terminal.onData((inputData) => {
     window.electronAPI.terminalInput(id, inputData);
+  });
+
+  // Copy/Paste support
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true;
+    const isMeta = event.metaKey || event.ctrlKey;
+
+    // Cmd/Ctrl+C: copy selection if text is selected, otherwise send SIGINT
+    if (isMeta && event.key === 'c') {
+      if (terminal.hasSelection()) {
+        navigator.clipboard.writeText(terminal.getSelection());
+        terminal.clearSelection();
+        return false;
+      }
+      return true;
+    }
+
+    // Cmd/Ctrl+V: paste from clipboard
+    if (isMeta && event.key === 'v') {
+      navigator.clipboard.readText().then(text => {
+        if (text) {
+          window.electronAPI.terminalInput(id, text);
+        }
+      });
+      return false;
+    }
+
+    return true;
   });
 
   // Get project settings for shell, env, and startup command
@@ -1429,6 +1458,46 @@ function canShowLivePreview(extension) {
   return ['.md', '.markdown', '.html', '.htm'].includes(extension.toLowerCase());
 }
 
+function getLanguageFromExtension(ext) {
+  const map = {
+    '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+    '.jsx': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
+    '.py': 'python', '.rb': 'ruby', '.java': 'java',
+    '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cxx': 'cpp', '.cc': 'cpp', '.hpp': 'cpp',
+    '.cs': 'csharp', '.go': 'go', '.rs': 'rust', '.swift': 'swift',
+    '.kt': 'kotlin', '.php': 'php', '.sql': 'sql',
+    '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+    '.json': 'json', '.xml': 'xml', '.svg': 'xml',
+    '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'ini',
+    '.css': 'css', '.scss': 'scss', '.less': 'less',
+    '.html': 'xml', '.htm': 'xml',
+    '.md': 'markdown', '.markdown': 'markdown',
+    '.r': 'r', '.lua': 'lua', '.pl': 'perl', '.pm': 'perl',
+    '.dockerfile': 'dockerfile', '.makefile': 'makefile',
+    '.ini': 'ini', '.cfg': 'ini', '.conf': 'ini',
+    '.diff': 'diff', '.patch': 'diff',
+    '.graphql': 'graphql', '.gql': 'graphql',
+    '.wasm': 'wasm', '.proto': 'protobuf',
+  };
+  return map[ext.toLowerCase()] || null;
+}
+
+function highlightCode(content, extension) {
+  const language = getLanguageFromExtension(extension);
+  try {
+    if (language) {
+      return hljs.highlight(content, { language }).value;
+    }
+    const result = hljs.highlightAuto(content);
+    return result.value;
+  } catch {
+    return content
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+}
+
 function renderPreview() {
   const previewTab = document.getElementById('preview-tab');
 
@@ -1494,12 +1563,9 @@ function renderPreview() {
       `;
     }
   } else {
-    // Raw mode
-    const escaped = content
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    html += `<pre class="file-preview-content"><code>${escaped}</code></pre>`;
+    // Raw mode with syntax highlighting
+    const highlighted = highlightCode(content, extension);
+    html += `<pre class="file-preview-content"><code class="hljs">${highlighted}</code></pre>`;
   }
 
   html += '</div>';
