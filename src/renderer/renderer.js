@@ -27,11 +27,6 @@ let cachedNotes = {};
 let cachedProfiles = { profiles: [], active: 'Default' };
 let cachedPreferences = { theme: 'light', customShortcuts: {} };
 
-// Workspace state
-let workspaceProjects = [];
-let workspaceExpandedFolders = new Map(); // projectPath -> Set of expanded paths
-let workspaceFileTreeData = new Map(); // projectPath -> Map of path -> children
-
 // Preview state
 let currentPreviewFile = null;
 let currentPreviewContent = null;
@@ -2113,6 +2108,7 @@ let expandedFolders = new Set();
 let fileTreeData = new Map(); // path -> children array
 let visibleFileItems = []; // flattened visible items
 let fileTreeScrollRAF = null;
+const projectFileTreeState = new Map(); // projectPath -> { expandedFolders, fileTreeData, scrollTop }
 
 async function loadFileTree(dirPath) {
   const result = await window.electronAPI.readDirectory(dirPath);
@@ -2773,27 +2769,56 @@ function selectProject(project) {
     splitState = { active: false, leftId: null, rightId: null };
   }
 
-  currentProject = project;
-
-  // Auto-add to workspace if not present
-  if (!workspaceProjects.some(p => p.path === project.path)) {
-    workspaceProjects.push(project);
+  // Save file tree state for the project we're leaving
+  if (currentProject) {
+    const fileTree = document.getElementById('file-tree');
+    projectFileTreeState.set(currentProject.path, {
+      expandedFolders: new Set(expandedFolders),
+      fileTreeData: new Map(fileTreeData),
+      scrollTop: fileTree ? fileTree.scrollTop : 0
+    });
   }
+
+  currentProject = project;
 
   document.querySelectorAll('.project-item').forEach(item => {
     item.classList.toggle('active', item.dataset.path === project.path);
   });
 
   initTerminalForProject(project.path, project.path);
-  // Use workspace file tree if multiple projects, else standard
-  if (workspaceProjects.length > 1) {
-    renderWorkspaceFileTree();
+
+  // Restore file tree state for the project we're switching to
+  const savedState = projectFileTreeState.get(project.path);
+  if (savedState) {
+    expandedFolders = savedState.expandedFolders;
+    fileTreeData = savedState.fileTreeData;
+    rebuildVisibleItems();
+    const fileTree = document.getElementById('file-tree');
+    fileTree.innerHTML = '';
+    fileTree.classList.add('file-tree-virtual');
+    const sentinel = document.createElement('div');
+    sentinel.className = 'file-tree-sentinel';
+    fileTree.appendChild(sentinel);
+    const viewport = document.createElement('div');
+    viewport.className = 'file-tree-viewport';
+    fileTree.appendChild(viewport);
+    updateFileTreeSentinel(fileTree);
+    renderVisibleItems(fileTree);
+    fileTree.addEventListener('scroll', () => {
+      if (fileTreeScrollRAF) return;
+      fileTreeScrollRAF = requestAnimationFrame(() => {
+        fileTreeScrollRAF = null;
+        renderVisibleItems(fileTree);
+      });
+    });
+    requestAnimationFrame(() => { fileTree.scrollTop = savedState.scrollTop; });
   } else {
+    expandedFolders = new Set();
     renderFileTree(project.path);
   }
+
   loadGitStatus(project.path);
   loadNotesForProject(project.path);
-  expandedFolders.clear();
   renderProjects(getProjects());
 }
 
@@ -2809,14 +2834,12 @@ function renderProjects(projects) {
   }
 
   projectList.innerHTML = projects.map((project, index) => {
-    const inWorkspace = workspaceProjects.some(wp => wp.path === project.path);
     return `
     <div class="project-item" data-index="${index}" data-path="${project.path}">
       <svg class="project-icon" viewBox="0 0 24 24" fill="none">
         <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/>
       </svg>
       <span class="project-name">${project.name}</span>
-      ${inWorkspace ? '<span class="workspace-badge">W</span>' : ''}
       <button class="project-settings-btn" data-path="${project.path}" title="Settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
@@ -2834,12 +2857,6 @@ function renderProjects(projects) {
       const project = getProjects().find(p => p.path === item.dataset.path);
       if (project) selectProject(project);
     });
-    // Right-click context menu for workspace
-    item.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      const project = getProjects().find(p => p.path === item.dataset.path);
-      if (project) showWorkspaceContextMenu(e, project);
-    });
     // Add drag and drop
     makeDraggable(item, index);
   });
@@ -2851,180 +2868,6 @@ function renderProjects(projects) {
       openProjectSettings(btn.dataset.path);
     });
   });
-}
-
-// ===== Multi-Folder Workspaces =====
-function showWorkspaceContextMenu(e, project) {
-  // Remove any existing context menu
-  document.querySelector('.workspace-context-menu')?.remove();
-
-  const inWorkspace = workspaceProjects.some(wp => wp.path === project.path);
-  const menu = document.createElement('div');
-  menu.className = 'workspace-context-menu';
-  menu.style.left = e.clientX + 'px';
-  menu.style.top = e.clientY + 'px';
-
-  if (inWorkspace) {
-    menu.innerHTML = `<button class="workspace-context-menu-item" data-action="remove">Remove from Workspace</button>`;
-  } else {
-    menu.innerHTML = `<button class="workspace-context-menu-item" data-action="add">Add to Workspace</button>`;
-  }
-
-  document.body.appendChild(menu);
-
-  menu.querySelector('[data-action]').addEventListener('click', () => {
-    const action = menu.querySelector('[data-action]').dataset.action;
-    if (action === 'add') addToWorkspace(project);
-    else if (action === 'remove') removeFromWorkspace(project);
-    menu.remove();
-  });
-
-  // Close on click outside
-  const closeMenu = (ev) => {
-    if (!menu.contains(ev.target)) {
-      menu.remove();
-      document.removeEventListener('click', closeMenu);
-    }
-  };
-  setTimeout(() => document.addEventListener('click', closeMenu), 0);
-}
-
-function addToWorkspace(project) {
-  if (workspaceProjects.some(wp => wp.path === project.path)) return;
-  workspaceProjects.push(project);
-  renderProjects(getProjects());
-  if (workspaceProjects.length > 1) {
-    renderWorkspaceFileTree();
-  }
-}
-
-function removeFromWorkspace(project) {
-  workspaceProjects = workspaceProjects.filter(wp => wp.path !== project.path);
-  renderProjects(getProjects());
-  if (workspaceProjects.length <= 1 && currentProject) {
-    renderFileTree(currentProject.path);
-  } else if (workspaceProjects.length > 1) {
-    renderWorkspaceFileTree();
-  }
-}
-
-async function renderWorkspaceFileTree() {
-  const fileTree = document.getElementById('file-tree');
-
-  if (workspaceProjects.length <= 1 && currentProject) {
-    return renderFileTree(currentProject.path);
-  }
-
-  fileTree.innerHTML = '';
-  fileTree.classList.remove('file-tree-virtual');
-
-  for (const project of workspaceProjects) {
-    const isFocused = currentProject && currentProject.path === project.path;
-
-    // Get or initialize per-project expanded state
-    if (!workspaceExpandedFolders.has(project.path)) {
-      workspaceExpandedFolders.set(project.path, new Set());
-    }
-    if (!workspaceFileTreeData.has(project.path)) {
-      workspaceFileTreeData.set(project.path, new Map());
-    }
-
-    const rootHeader = document.createElement('div');
-    rootHeader.className = `workspace-root-header${isFocused ? ' focused' : ''}`;
-
-    // Load root items if not cached
-    const projectTreeData = workspaceFileTreeData.get(project.path);
-    if (!projectTreeData.has('__root__')) {
-      const items = await loadFileTree(project.path);
-      projectTreeData.set('__root__', items);
-    }
-
-    const expandedSet = workspaceExpandedFolders.get(project.path);
-    const isExpanded = expandedSet.has(project.path);
-
-    rootHeader.innerHTML = `
-      <svg class="folder-chevron${isExpanded ? ' expanded' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>
-      <span>${escapeHtml(project.name)}</span>
-    `;
-
-    rootHeader.addEventListener('click', () => {
-      if (expandedSet.has(project.path)) {
-        expandedSet.delete(project.path);
-      } else {
-        expandedSet.add(project.path);
-      }
-      renderWorkspaceFileTree();
-    });
-
-    fileTree.appendChild(rootHeader);
-
-    if (isExpanded) {
-      const childrenContainer = document.createElement('div');
-      childrenContainer.className = 'workspace-children';
-      const rootItems = projectTreeData.get('__root__') || [];
-      renderSimpleFileTree(childrenContainer, rootItems, 1, project.path, project);
-      fileTree.appendChild(childrenContainer);
-    }
-  }
-}
-
-function renderSimpleFileTree(container, items, depth, projectPath, project) {
-  const expandedSet = workspaceExpandedFolders.get(projectPath);
-  const projectTreeData = workspaceFileTreeData.get(projectPath);
-
-  for (const item of items) {
-    const div = document.createElement('div');
-    div.className = `file-item ${item.isDirectory ? 'folder' : 'file'}`;
-    div.style.height = `${FILE_ITEM_HEIGHT}px`;
-    div.style.paddingLeft = `${12 + depth * 16}px`;
-
-    const isExpanded = item.isDirectory && expandedSet.has(item.path);
-    const icon = item.isDirectory
-      ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2v11z" stroke="currentColor" stroke-width="1.5"/></svg>'
-      : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" stroke="currentColor" stroke-width="1.5"/><path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5"/></svg>';
-    const chevron = item.isDirectory
-      ? `<svg class="folder-chevron${isExpanded ? ' expanded' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-      : '';
-
-    div.innerHTML = `${chevron}${icon}<span>${item.name}</span>`;
-
-    div.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (item.isDirectory) {
-        if (expandedSet.has(item.path)) {
-          expandedSet.delete(item.path);
-        } else {
-          expandedSet.add(item.path);
-          if (!projectTreeData.has(item.path)) {
-            const children = await loadFileTree(item.path);
-            projectTreeData.set(item.path, children);
-          }
-        }
-        renderWorkspaceFileTree();
-      } else {
-        // Switch to owning project and preview file
-        if (!currentProject || currentProject.path !== project.path) {
-          currentProject = project;
-          document.querySelectorAll('.project-item').forEach(pi => {
-            pi.classList.toggle('active', pi.dataset.path === project.path);
-          });
-          initTerminalForProject(project.path, project.path);
-          loadGitStatus(project.path);
-          loadNotesForProject(project.path);
-        }
-        await previewFile(item.path);
-      }
-    });
-
-    container.appendChild(div);
-
-    // Render children if expanded
-    if (item.isDirectory && isExpanded) {
-      const children = projectTreeData.get(item.path) || [];
-      renderSimpleFileTree(container, children, depth + 1, projectPath, project);
-    }
-  }
 }
 
 // ===== Add Project Dropdown =====
@@ -3688,9 +3531,10 @@ document.getElementById('settings-remove').addEventListener('click', () => {
     saveProjects(projects);
     renderProjects(projects);
 
-    // Clean up settings and notes
+    // Clean up settings, notes, and file tree state
     deleteProjectSettings(editingProjectPath);
     delete cachedNotes[editingProjectPath];
+    projectFileTreeState.delete(editingProjectPath);
     window.electronAPI.storeWrite('notes.json', cachedNotes);
 
     // Clear current project if it was removed
@@ -4015,8 +3859,7 @@ function saveSession() {
 
   const session = {
     activeProject: currentProject.path,
-    openTerminals: {},
-    workspaceProjects: workspaceProjects.map(p => ({ path: p.path, name: p.name }))
+    openTerminals: {}
   };
 
   // Save terminal tab info for each project (including buffer content)
@@ -4041,13 +3884,6 @@ async function restoreSession() {
 
   try {
     const projects = getProjects();
-
-    // Restore workspace
-    if (session.workspaceProjects && Array.isArray(session.workspaceProjects)) {
-      workspaceProjects = session.workspaceProjects.filter(wp =>
-        projects.some(p => p.path === wp.path)
-      );
-    }
 
     // Find and select the active project
     const project = projects.find(p => p.path === session.activeProject);
