@@ -548,6 +548,7 @@ async function createNewTab(projectPath, cwd, name = null) {
 
     // Cmd/Ctrl+V: paste from clipboard (with broadcast support)
     if (isMeta && event.key === 'v') {
+      event.preventDefault();
       navigator.clipboard.readText().then(text => {
         if (text) {
           if (broadcastMode && currentProject && projectData.has(currentProject.path)) {
