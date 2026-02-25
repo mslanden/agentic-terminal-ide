@@ -519,6 +519,17 @@ async function createNewTab(projectPath, cwd, name = null) {
   const { terminal, fitAddon, searchAddon } = createTerminalInstance(fontOpts);
   terminal.open(container);
 
+  // Prevent double-paste: xterm.js handles the paste event but doesn't preventDefault(),
+  // so the browser also inserts the text into the textarea, triggering an 'input' event
+  // with inputType='insertText' which xterm processes again. Adding preventDefault() on
+  // the paste event stops the browser from inserting into the textarea.
+  const terminalTextarea = container.querySelector('textarea.xterm-helper-textarea');
+  if (terminalTextarea) {
+    terminalTextarea.addEventListener('paste', (e) => {
+      e.preventDefault();
+    });
+  }
+
   // Handle input (with broadcast support)
   terminal.onData((inputData) => {
     if (broadcastMode && currentProject && projectData.has(currentProject.path)) {
@@ -531,7 +542,7 @@ async function createNewTab(projectPath, cwd, name = null) {
     }
   });
 
-  // Copy/Paste support
+  // Copy support (paste handled natively by xterm.js)
   terminal.attachCustomKeyEventHandler((event) => {
     if (event.type !== 'keydown') return true;
     const isMeta = event.metaKey || event.ctrlKey;
@@ -544,24 +555,6 @@ async function createNewTab(projectPath, cwd, name = null) {
         return false;
       }
       return true;
-    }
-
-    // Cmd/Ctrl+V: paste from clipboard (with broadcast support)
-    if (isMeta && event.key === 'v') {
-      event.preventDefault();
-      navigator.clipboard.readText().then(text => {
-        if (text) {
-          if (broadcastMode && currentProject && projectData.has(currentProject.path)) {
-            const tabs = projectData.get(currentProject.path).tabs;
-            for (const tab of tabs) {
-              window.electronAPI.terminalInput(tab.id, text);
-            }
-          } else {
-            window.electronAPI.terminalInput(id, text);
-          }
-        }
-      });
-      return false;
     }
 
     return true;
